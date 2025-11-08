@@ -9,6 +9,13 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+# Load .env automatically if present
+try:
+    import dotenv  # type: ignore
+    dotenv.load_dotenv()
+except Exception:
+    pass
+
 from racen.log import get_logger
 from racen.step3_retrieve import retrieve
 
@@ -16,19 +23,27 @@ logger = get_logger("racen.smoke3")
 
 
 def main():
-    query = "example domain"
-    results = retrieve(query_text=query, top_k=5)
-    if not results:
-        logger.info("No results found")
-        return
-    logger.info(f"Top {len(results)} results for: {query}")
-    for i, r in enumerate(results, 1):
-        preview = (r.text[:140] + "...") if len(r.text) > 140 else r.text
-        logger.info(
-            f"#{i} score={r.score:.3f} (vec={r.score_vector:.3f}, lex={r.score_lexical:.3f}) | "
-            f"chunk={r.chunk_id} doc={r.document_id} src={r.source} | {preview}"
-        )
-
+    queries = [
+        "return policy",
+        "refund timeline",
+        "warranty for iPhone",
+        "shipping charges",
+        "payment methods",
+        "how to contact support",
+    ]
+    for query in queries:
+        results = retrieve(query_text=query, top_k=5)
+        if not results:
+            logger.info(f"No results found for: {query}")
+            continue
+        logger.info(f"Top {len(results)} results for: {query}")
+        for i, r in enumerate(results, 1):
+            preview = (r.text[:140] + "...") if len(r.text) > 140 else r.text
+            logger.info(
+                f"#{i} score={r.score:.3f} "
+                f"(vec={r.score_vector:.3f}, lex={r.score_lexical:.3f}) | "
+                f"chunk={r.chunk_id} doc={r.document_id} src={r.source} | {preview}"
+            )
 
 if __name__ == "__main__":
     logger.info("Smoke Step 3 (retrieve): start")

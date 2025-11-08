@@ -1,0 +1,50 @@
+version: "3.8"
+services:
+  crawl4ai:
+    image: ghcr.io/crawl4ai/crawl4ai:latest
+    environment:
+      - LOG_LEVEL=info
+      - CRAWL_MAX_CONCURRENCY=4
+      - CRAWL_RPS=1
+    ports:
+      - "8081:8080"
+    restart: unless-stopped
+
+  markitdown-mcp:
+    image: mcp/markitdown:latest
+    environment:
+      - WORKERS=2
+      - MAX_UPLOAD_MB=25
+    ports:
+      - "8082:8080"
+    restart: unless-stopped
+
+  # docling-rag-agent:
+  #   image: <docling-rag-agent-image>
+  #   environment:
+  #     - CLEAN_STRICT=true
+  #     - CHUNK_MAX_TOKENS=800
+  #   ports:
+  #     - "8083:8080"
+  #   restart: unless-stopped
+
+  # embeddings-mcp:
+  #   image: <pydantic-ai-mcp-agent-image>
+  #   environment:
+  #     - OPENAI_API_KEY=${OPENAI_API_KEY}
+  #     - EMBED_DIM=1536
+  #     - PROVIDER=openai
+  #     - MODEL=text-embedding-3-small
+  #   ports:
+  #     - "8085:8080"
+  #   restart: unless-stopped
+
+  # retriever-mcp:
+  #   image: <all-rag-strategies-image>
+  #   environment:
+  #     - DATABASE_URL=${DATABASE_URL}
+  #     - OPENAI_API_KEY=${OPENAI_API_KEY}
+  #     - EF_SEARCH=100
+  #   ports:
+  #     - "8086:8080"
+  #   restart: unless-stopped

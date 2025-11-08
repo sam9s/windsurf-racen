@@ -10,6 +10,13 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+# Load .env automatically if present
+try:
+    import dotenv  # type: ignore
+    dotenv.load_dotenv()
+except Exception:
+    pass
+
 from racen.log import get_logger
 from racen.orchestrator import ingest_url
 

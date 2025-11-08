@@ -34,18 +34,29 @@ def _normalize(scores: List[float]) -> List[float]:
     return [(s - mn) / (mx - mn) for s in scores]
 
 
-def search_vector(conn: psycopg.Connection, *, query_vec: List[float], top_k: int = 5) -> List[RetrievedChunk]:
+def _vec_literal(vec: List[float]) -> str:
+    # pgvector text literal: [v1, v2, ...]
+    return "[" + ", ".join(f"{v:.6f}" for v in vec) + "]"
+
+
+def search_vector(
+    conn: psycopg.Connection,
+    *,
+    query_vec: List[float],
+    top_k: int = 5,
+) -> List[RetrievedChunk]:
+    lit = _vec_literal(query_vec)
     sql = (
         "SELECT c.id AS chunk_id, c.document_id, d.source, c.text, "
-        "(1 - (e.embedding <=> %s::vector)) AS score_vector "
+        f"(1 - (e.embedding <=> '{lit}'::vector)) AS score_vector "
         "FROM embeddings e "
         "JOIN chunks c ON c.id = e.chunk_id "
         "JOIN documents d ON d.id = c.document_id "
-        "ORDER BY (e.embedding <=> %s::vector) ASC "
+        f"ORDER BY (e.embedding <=> '{lit}'::vector) ASC "
         "LIMIT %s"
     )
     with conn.cursor() as cur:
-        cur.execute(sql, (query_vec, query_vec, top_k))
+        cur.execute(sql, (top_k,))
         rows = cur.fetchall()
     out: List[RetrievedChunk] = []
     for r in rows:
@@ -147,13 +158,31 @@ def search_hybrid(
 def retrieve(query_text: str, top_k: int = 5) -> List[RetrievedChunk]:
     """High-level API: embed query, run hybrid search, return results."""
     embedder = OpenAIEmbedder()
-    q_emb = embedder.embed(id="q", text=query_text)
     conn = get_conn()
     try:
+        # Detect embedding dimension from DB (fallback to 256 if empty)
+        expected_dim = 256
+        with conn.cursor() as cur:
+            try:
+                cur.execute("SELECT vector_dims(embedding) AS dim FROM embeddings LIMIT 1")
+                row = cur.fetchone()
+                if row and row.get("dim"):
+                    expected_dim = int(row["dim"])  # type: ignore[arg-type]
+            except Exception:
+                expected_dim = 256
+
+        # Embed query and fit to expected dimension
+        q_emb = embedder.embed(id="q", text=query_text)
+        q_vec = list(q_emb.vector)
+        if len(q_vec) > expected_dim:
+            q_vec = q_vec[:expected_dim]
+        elif len(q_vec) < expected_dim:
+            q_vec = q_vec + [0.0] * (expected_dim - len(q_vec))
+
         results = search_hybrid(
             conn,
             query_text=query_text,
-            query_vec=q_emb.vector,
+            query_vec=q_vec,
             top_k=top_k,
         )
         return results
