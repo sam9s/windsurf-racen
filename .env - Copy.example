@@ -1,0 +1,9 @@
+# Postgres
+PGHOST=localhost
+PGPORT=5432
+PGDATABASE=racen
+PGUSER=postgres
+PGPASSWORD=postgres
+
+# OpenAI
+OPENAI_API_KEY=<key>
