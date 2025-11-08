@@ -1,0 +1,130 @@
+(.venv) PS J:\My Drive\Windsurf Projects\CascadeProjects\windsurf-project> .\.venv\Scripts\python.exe scripts\smoke_step3.py
+2025-11-08 18:39:04 | INFO | racen.smoke3 | Smoke Step 3 (retrieve): start
+2025-11-08 18:39:04 | INFO | racen.write | Connecting to Postgres localhost:5432/racen as postgres
+2025-11-08 18:39:04 | INFO | racen.embed | Requesting embeddings (model=text-embedding-3-small, len=13 chars)
+2025-11-08 18:39:05 | INFO | racen.smoke3 | Top 5 results for: return policy
+2025-11-08 18:39:05 | INFO | racen.smoke3 | #1 score=0.000 (vec=0.000, lex=1.000) | chunk=doc_494c5bc:109916:111504:f2d58da712dc878a doc=doc_494c5bc src=https://grest.in/blogs/news/top-5-second-hand-iphones-worth-buying-in-india-2025-edition | ecosystem.
+
+Why Buy:
+
+* OLED Super Retina XDR display.
+* A14 Bionic chip.
+* 5G connectivity.
+
+Price in India:
+
+* New: ₹50,000\+
+* Refurbishe...
+2025-11-08 18:39:05 | INFO | racen.smoke3 | #2 score=0.000 (vec=0.000, lex=1.000) | chunk=doc_494c5bc:112331:114091:b60f1d3138e4b345 doc=doc_494c5bc src=https://grest.in/blogs/news/top-5-second-hand-iphones-worth-buying-in-india-2025-edition | performance and affordability.\\nWhy Buy:\\n\\n\\nA15 Bionic chip for smooth performance.\\n\\n\\nExcellent battery life.\\n\\n\\n5G ready.\...
+2025-11-08 18:39:05 | INFO | racen.smoke3 | #3 score=0.000 (vec=0.000, lex=1.000) | chunk=doc_ae5cda63:107131:108636:0d16be5f25a23e9b doc=doc_ae5cda63 src=https://grest.in/blogs/news/refurbished-vs-new-macbook-pro-in-india-which-should-you-buy-in-2025 | This article compares refurbished vs new MacBook Pro in India so you can make the right choice in 2025\.
+
+## What Does “Refurbished MacBook ...
+2025-11-08 18:39:05 | INFO | racen.smoke3 | #4 score=0.000 (vec=0.000, lex=1.000) | chunk=doc_ae5cda63:112419:114180:fcaebae5f7a24696 doc=doc_ae5cda63 src=https://grest.in/blogs/news/refurbished-vs-new-macbook-pro-in-india-which-should-you-buy-in-2025 | ;
+ button.classList.toggle('active');
+ answer.classList.toggle('show');
+ });
+});
+
+## 0 comments
+
+## Leave a comment
+
+ Name
+
+
+ Email
+
+
+ Messa...
+2025-11-08 18:39:05 | INFO | racen.smoke3 | #5 score=0.000 (vec=0.000, lex=1.000) | chunk=doc_30be5d42:108537:110141:9108d2deb4b5d644 doc=doc_30be5d42 src=https://grest.in/blogs/news/top-5-reasons-to-buy-a-certified-refurbished-iphone-in-india-2025 | still-worth-buying-in-2025-expert-guide) are sold “as\-is,” often without warranty or proper inspection.
+
+On the other hand, certified refur...
+2025-11-08 18:39:05 | INFO | racen.write | Connecting to Postgres localhost:5432/racen as postgres
+2025-11-08 18:39:05 | INFO | racen.embed | Requesting embeddings (model=text-embedding-3-small, len=15 chars)
+2025-11-08 18:39:06 | INFO | racen.smoke3 | Top 5 results for: refund timeline
+2025-11-08 18:39:06 | INFO | racen.smoke3 | #1 score=0.600 (vec=0.347, lex=0.000) | chunk=doc_c3e29fd3:188459:190072:e0c61f8e612f0ac5 doc=doc_c3e29fd3 src=https://grest.in/collections/mobile-phones/products/refurbished-apple-iphone-15-plus | ou can cancel your order if it is not shipped (COD Order Only). Please login to your Grest account for initiating the cancellation \& follow...
+2025-11-08 18:39:06 | INFO | racen.smoke3 | #2 score=0.000 (vec=0.346, lex=0.000) | chunk=doc_7f2e1e9d:193416:195029:e0c61f8e612f0ac5 doc=doc_7f2e1e9d src=https://grest.in/products/refurbished-apple-iphone-15-pro | ou can cancel your order if it is not shipped (COD Order Only). Please login to your Grest account for initiating the cancellation \& follow...
+2025-11-08 18:39:06 | INFO | racen.smoke3 | #3 score=0.000 (vec=0.346, lex=0.000) | chunk=doc_ef0591b9:182275:183888:e0c61f8e612f0ac5 doc=doc_ef0591b9 src=https://grest.in/products/refurbished-apple-iphone-14-pro-max | ou can cancel your order if it is not shipped (COD Order Only). Please login to your Grest account for initiating the cancellation \& follow...
+2025-11-08 18:39:06 | INFO | racen.smoke3 | #4 score=0.000 (vec=0.346, lex=0.000) | chunk=doc_748a35d:182323:183936:e0c61f8e612f0ac5 doc=doc_748a35d src=https://grest.in/products/refurbished-apple-iphone-14-pro-max?variant=48570100220135 | ou can cancel your order if it is not shipped (COD Order Only). Please login to your Grest account for initiating the cancellation \& follow...
+2025-11-08 18:39:06 | INFO | racen.smoke3 | #5 score=0.000 (vec=0.346, lex=0.000) | chunk=doc_76f4fbc3:199695:201308:e0c61f8e612f0ac5 doc=doc_76f4fbc3 src=https://grest.in/products/refurbished-iphone-12-mini | ou can cancel your order if it is not shipped (COD Order Only). Please login to your Grest account for initiating the cancellation \& follow...
+2025-11-08 18:39:06 | INFO | racen.write | Connecting to Postgres localhost:5432/racen as postgres
+2025-11-08 18:39:06 | INFO | racen.embed | Requesting embeddings (model=text-embedding-3-small, len=19 chars)
+2025-11-08 18:39:07 | INFO | racen.smoke3 | Top 5 results for: warranty for iPhone
+2025-11-08 18:39:07 | INFO | racen.smoke3 | #1 score=0.600 (vec=0.589, lex=0.000) | chunk=doc_e7113ee4:110530:112291:45b158e1dea75ef9 doc=doc_e7113ee4 src=https://grest.in/blogs/news/second-hand-iphones-with-warranty-why-it-matters-more-than-price-in-2025 | s://graph.org/Get\-your\-BTC\-09\-04?hs\=ab03e022b7413f37960c02265afbb9a3\& 🖇
+•
+October 1, 2025
+
+## Leave a comment
+
+ Name
+
+
+ Email
+
+
+ Messa...
+2025-11-08 18:39:07 | INFO | racen.smoke3 | #2 score=0.462 (vec=0.562, lex=0.000) | chunk=doc_e7113ee4:105738:107383:c95fb1e22eb6dd40 doc=doc_e7113ee4 src=https://grest.in/blogs/news/second-hand-iphones-with-warranty-why-it-matters-more-than-price-in-2025 | ems: center;
+ color: \#000;
+ transition: color 0\.3s ease;
+}
+
+.faq\-question:hover {
+ /\* color: \#d60000; \*/
+}
+
+.arrow {
+ transition: tran...
+2025-11-08 18:39:07 | INFO | racen.smoke3 | #3 score=0.124 (vec=0.496, lex=0.000) | chunk=doc_f74c19d2:81754:83514:742d6229146f7594 doc=doc_f74c19d2 src=https://grest.in/products/refurbished-apple-iphone-12?variant=47835918270695 | window.\_\_adTraceProductInfo \= {    
+ "id": "8229763481831",
+ "name": \`Apple iPhone 12\`,
+ "price": "20,099",
+ "url": "/products/refurbished\...
+2025-11-08 18:39:07 | INFO | racen.smoke3 | #4 score=0.124 (vec=0.496, lex=0.000) | chunk=doc_da056d:81525:83285:742d6229146f7594 doc=doc_da056d src=https://grest.in/products/refurbished-apple-iphone-12 | window.\_\_adTraceProductInfo \= {
+ "id": "8229763481831",
+ "name": \`Apple iPhone 12\`,
+ "price": "20,099",
+ "url": "/products/refurbished\...
+2025-11-08 18:39:07 | INFO | racen.smoke3 | #5 score=0.000 (vec=0.472, lex=0.000) | chunk=doc_62452e23:108165:109577:0277ab61e6208155 doc=doc_62452e23 src=https://grest.in/pages/why-grest | very. Please refer to your order email for further information.
+
+### **How much time will GREST take to resolve my query if it is under warr...
+2025-11-08 18:39:07 | INFO | racen.write | Connecting to Postgres localhost:5432/racen as postgres
+2025-11-08 18:39:07 | INFO | racen.embed | Requesting embeddings (model=text-embedding-3-small, len=16 chars)
+2025-11-08 18:39:08 | INFO | racen.smoke3 | Top 2 results for: shipping charges
+2025-11-08 18:39:08 | INFO | racen.smoke3 | #1 score=0.600 (vec=0.140, lex=0.000) | chunk=doc_430be257:108525:110042:eec6ca58c2f17b02 doc=doc_430be257 src=https://grest.in/blogs/news/certified-vs-non-certified-second-hand-iphones-which-should-you-buy | o ensure quality and reliability.
+
+Key Features of Certified Second\-Hand iPhones:
+
+* Thorough Testing: Each unit is inspected for hardware ...
+2025-11-08 18:39:08 | INFO | racen.smoke3 | #2 score=0.400 (vec=0.000, lex=1.000) | chunk=doc_62452e23:113720:115271:e62b62430d1dd6ad doc=doc_62452e23 src=https://grest.in/pages/why-grest | ailto:care@grest.in) **for a Return Merchandise Authorization (RMA) number. Once received, securely pack the item with proof of purchase and...
+2025-11-08 18:39:08 | INFO | racen.write | Connecting to Postgres localhost:5432/racen as postgres
+2025-11-08 18:39:08 | INFO | racen.embed | Requesting embeddings (model=text-embedding-3-small, len=15 chars)
+2025-11-08 18:39:09 | INFO | racen.smoke3 | Top 5 results for: payment methods
+2025-11-08 18:39:09 | INFO | racen.smoke3 | #1 score=0.600 (vec=0.329, lex=0.000) | chunk=doc_58f1be12:59825:61586:6f97c9025f536871 doc=doc_58f1be12 src=https://grest.in/products/macbook-air-a1466-i5-4gb-128ssd-mid-2013?variant=44816421322983 | sd\-mid\-2013?variant\=44816421322983","u":"8b11e8eacf43","p":"product","rtyp":"product","rid":8205984727271};
+window.ShopifyPaypalV4Visibil...
+2025-11-08 18:39:09 | INFO | racen.smoke3 | #2 score=0.456 (vec=0.325, lex=0.000) | chunk=doc_bad02032:59649:61410:4ab851bbefd60e3e doc=doc_bad02032 src=https://grest.in/collections/mobile-phones | n\\/collections\\/mobile\-phones","u":"210448fdd85b","p":"collection","rtyp":"collection","rid":406599074023};
+window.ShopifyPaypalV4Visibil...
+2025-11-08 18:39:09 | INFO | racen.smoke3 | #3 score=0.167 (vec=0.316, lex=0.000) | chunk=doc_3984d059:59810:61571:63856a1295f1ccc6 doc=doc_3984d059 src=https://grest.in/products/refurbished-apple-iphone-11-pro-max?variant=47835912372455 | -11\-pro\-max?variant\=47835912372455","u":"434780dc6947","p":"product","rtyp":"product","rid":8293930107111};
+window.ShopifyPaypalV4Visibil...
+2025-11-08 18:39:09 | INFO | racen.smoke3 | #4 score=0.034 (vec=0.312, lex=0.000) | chunk=doc_e4c4714e:60225:61986:ae2c6e29fbd6a6b0 doc=doc_e4c4714e src=https://grest.in/products/test?variant=51250997493991 | 0100\\u0026ad\_id\=120237905689270100","u":"22a925268d3d","p":"product","rtyp":"product","rid":9299091882215};
+window.ShopifyPaypalV4Visibil...
+2025-11-08 18:39:09 | INFO | racen.smoke3 | #5 score=0.000 (vec=0.311, lex=0.000) | chunk=doc_bccba0a7:59810:61571:bc47261f84cad59d doc=doc_bccba0a7 src=https://grest.in/products/iphone-15-pro-max?variant=48576158892263 | -15\-pro\-max?variant\=48576158892263","u":"c2595ce39d25","p":"product","rtyp":"product","rid":8614799868135};
+window.ShopifyPaypalV4Visibil...
+2025-11-08 18:39:09 | INFO | racen.write | Connecting to Postgres localhost:5432/racen as postgres
+2025-11-08 18:39:09 | INFO | racen.embed | Requesting embeddings (model=text-embedding-3-small, len=22 chars)
+2025-11-08 18:39:10 | INFO | racen.smoke3 | Top 5 results for: how to contact support
+2025-11-08 18:39:10 | INFO | racen.smoke3 | #1 score=0.600 (vec=0.447, lex=0.000) | chunk=doc_62452e23:106800:108325:d0a6824398d0d962 doc=doc_62452e23 src=https://grest.in/pages/why-grest | 8HVo/tested-certified.png?width=1280)### Tested and Certified by Experts        
+
+### When it comes to purchasing pre\-owned tech, the experience ca...
+2025-11-08 18:39:10 | INFO | racen.smoke3 | #2 score=0.565 (vec=0.441, lex=0.000) | chunk=doc_94fd4e99:112542:113910:b4a747c4cb9255ce doc=doc_94fd4e99 src=https://grest.in/blogs/news/top-refurbished-iphones-you-can-buy-on-emi-in-india-2025-edition | to 70% on iPhone 15, 14 Pro, 13 \\u0026amp; more. Explore certified, warranty\-backed deals at Grest.in today!","image":"https:\\/\\/grest.i...
+2025-11-08 18:39:10 | INFO | racen.smoke3 | #3 score=0.473 (vec=0.426, lex=0.000) | chunk=doc_62452e23:108165:109577:0277ab61e6208155 doc=doc_62452e23 src=https://grest.in/pages/why-grest | very. Please refer to your order email for further information.
+
+### **How much time will GREST take to resolve my query if it is under warr...
+2025-11-08 18:39:10 | INFO | racen.smoke3 | #4 score=0.319 (vec=0.402, lex=0.000) | chunk=doc_62452e23:117093:118717:e8a7667fe0c7a739 doc=doc_62452e23 src=https://grest.in/pages/why-grest | ally, orders are processed within 48 hours, and we keep you informed every step of the way.
+
+Any shipping questions? Reach out to our custom...
+2025-11-08 18:39:10 | INFO | racen.smoke3 | #5 score=0.000 (vec=0.351, lex=0.000) | chunk=doc_db8a2ba1:81601:83362:a09cb938f35b1f5f doc=doc_db8a2ba1 src=https://grest.in/collections/mobile-phones/products/refurbished-apple-iphone-14-pro | \_adTraceProductInfo \= {      
+ "id": "8561636737255",
+ "name": \`Apple iPhone 14 Pro\`,
+ "price": "51,999",
+ "url": "/products/refurbished\-appl...
+2025-11-08 18:39:10 | INFO | racen.smoke3 | Smoke Step 3 (retrieve): done
