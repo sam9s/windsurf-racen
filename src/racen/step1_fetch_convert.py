@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pathlib
 from typing import Optional
+import os
 
 import requests
 from markdownify import markdownify as md
@@ -18,7 +19,8 @@ class MarkItDownClient:
     """
 
     def __init__(self) -> None:
-        pass
+        # Optional HTTP endpoint for MarkItDown MCP-like service
+        self.mcp_url = os.getenv("MARKITDOWN_HTTP_URL")
 
     def convert_to_markdown(
         self,
@@ -28,11 +30,44 @@ class MarkItDownClient:
         html: Optional[str] = None,
     ) -> str:
         if url:
+            # Prefer remote MarkItDown MCP if configured
+            if self.mcp_url:
+                try:
+                    resp = requests.post(
+                        self.mcp_url,
+                        json={"url": url},
+                        timeout=30,
+                        headers={"Content-Type": "application/json"},
+                    )
+                    if resp.status_code == 200:
+                        return resp.text.strip()
+                    logger.info(
+                        f"MarkItDown MCP HTTP returned {resp.status_code}; falling back"
+                    )
+                except Exception as e:
+                    logger.info(f"MarkItDown MCP HTTP failed: {e}; falling back")
             html_text = fetch_url(url)
             return convert_html_to_markdown(html_text, base_url=url)
         if file_path:
+            # Remote MCP not attempted for local files in this simple hook
             return file_to_markdown(file_path)
         if html is not None:
+            # If MCP URL present, allow posting raw HTML as body
+            if self.mcp_url:
+                try:
+                    resp = requests.post(
+                        self.mcp_url,
+                        data=html.encode("utf-8"),
+                        timeout=30,
+                        headers={"Content-Type": "text/html; charset=utf-8"},
+                    )
+                    if resp.status_code == 200:
+                        return resp.text.strip()
+                    logger.info(
+                        f"MarkItDown MCP HTTP returned {resp.status_code}; falling back"
+                    )
+                except Exception as e:
+                    logger.info(f"MarkItDown MCP HTTP failed: {e}; falling back")
             return convert_html_to_markdown(html)
         raise ValueError("One of url, file_path, or html must be provided")
 

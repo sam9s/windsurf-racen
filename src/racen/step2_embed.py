@@ -68,20 +68,49 @@ class OpenAIEmbedder:
         logger.info(
             f"Requesting embeddings (model={self.model}, len={len(text)} chars)"
         )
-        resp = requests.post(
-            url,
-            headers=headers,
-            data=json.dumps(payload),
-            timeout=self.timeout,
-        )
-        if resp.status_code != 200:
-            logger.error(
-                f"OpenAI embeddings error {resp.status_code}: {resp.text[:200]}"
-            )
-            raise RuntimeError(
-                f"OpenAI embeddings failed: {resp.status_code}"
-            )
-        data = resp.json()
+
+        # retry with exponential backoff on transient network errors
+        max_attempts = 4
+        backoff = 1.0
+        last_err: Optional[str] = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                resp = requests.post(
+                    url,
+                    headers=headers,
+                    data=json.dumps(payload),
+                    timeout=self.timeout,
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    break
+                # For 4xx other than 429, do not retry
+                if 400 <= resp.status_code < 500 and resp.status_code != 429:
+                    logger.error(
+                        f"OpenAI embeddings error {resp.status_code}: "
+                        f"{resp.text[:200]}"
+                    )
+                    raise RuntimeError(
+                        f"OpenAI embeddings failed: {resp.status_code}"
+                    )
+                last_err = f"status={resp.status_code} body={resp.text[:120]}"
+            except Exception as e:  # network error
+                last_err = str(e)
+            if attempt < max_attempts:
+                logger.info(
+                    f"Embedding retry {attempt}/{max_attempts-1} after error: {last_err}"
+                )
+                try:
+                    import time
+
+                    time.sleep(backoff)
+                except Exception:
+                    pass
+                backoff *= 2
+            else:
+                logger.error(f"OpenAI embeddings error: {last_err}")
+                raise RuntimeError("OpenAI embeddings failed: retry_exhausted")
+
         vec = data["data"][0]["embedding"]
         return EmbeddingResult(
             id=id,
