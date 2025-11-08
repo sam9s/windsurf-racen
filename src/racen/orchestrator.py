@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 from typing import Optional
 
 from .log import get_logger
@@ -14,6 +15,7 @@ from .step2_write import (
     upsert_document,
     upsert_chunk,
     upsert_embedding,
+    embedding_exists,
 )
 
 logger = get_logger("racen.orchestrator")
@@ -54,27 +56,36 @@ def ingest_url(
     c_ins = 0
     e_ins = 0
     for ch in chunks:
+        # Stable chunk id: doc_id + positions + text hash
+        text_hash = hashlib.sha1(ch.text.encode("utf-8")).hexdigest()[:16]
+        cid = f"{did}:{ch.start_char}:{ch.end_char}:{text_hash}"
+
         upsert_chunk(
             conn,
-            chunk_id=ch.id,
+            chunk_id=cid,
             document_id=did,
             start_char=ch.start_char,
             end_char=ch.end_char,
             text=ch.text,
         )
+        c_ins += 1
+
+        # Skip API call if embedding already present
+        if embedding_exists(conn, chunk_id=cid):
+            continue
+
         emb = embedder.embed(
-            id=ch.id,
+            id=cid,
             text=ch.text,
             metadata={"doc_id": did, "source": url},
         )
         upsert_embedding(
             conn,
-            chunk_id=ch.id,
+            chunk_id=cid,
             vector=emb.vector,
             model=emb.model,
             embedding_dim=embedding_dim,
         )
-        c_ins += 1
         e_ins += 1
 
     logger.info(

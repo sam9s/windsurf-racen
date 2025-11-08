@@ -116,19 +116,32 @@ class Chunker:
                 cursor_chars = 0
                 start_line = end_line
 
+        budget = self.max_tokens * 4
         for (sa, sb) in sections:
-            section_text = "\n".join(lines[sa:sb])
+            # Stream the section line-by-line so we can split very large sections
+            sec_lines = lines[sa:sb]
             if not buf_lines:
                 start_line = sa
-            approx_tokens = self._approx_tokens(section_text)
-            approx_chars = approx_tokens * 4
-            if (cursor_chars + approx_chars) <= (self.max_tokens * 4):
-                buf_lines.extend(lines[sa:sb])
-                cursor_chars += approx_chars
-            else:
-                flush(sa)
-                buf_lines.extend(lines[sa:sb])
-                cursor_chars = approx_chars
+            for idx, ln in enumerate(sec_lines):
+                # If an individual line exceeds budget, slice it into pieces
+                if len(ln) > budget:
+                    for off in range(0, len(ln), budget):
+                        piece = ln[off : off + budget]
+                        if (cursor_chars + len(piece)) > budget:
+                            flush(sa + idx)
+                            if not buf_lines:
+                                start_line = sa + idx
+                        buf_lines.append(piece)
+                        cursor_chars += len(piece)
+                    continue
+                # Normal line handling
+                if (cursor_chars + len(ln)) > budget:
+                    flush(sa + idx)
+                    # After flushing, start a new chunk if needed
+                    if not buf_lines:
+                        start_line = sa + idx
+                buf_lines.append(ln)
+                cursor_chars += len(ln)
         flush(len(lines))
 
         logger.info(

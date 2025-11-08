@@ -25,13 +25,42 @@ logger = get_logger("racen.crawl_ingest")
 
 
 def main() -> int:
-    p = argparse.ArgumentParser(description="Crawl a domain and ingest pages into RACEN (pgvector)")
+    p = argparse.ArgumentParser(
+        description="Crawl a domain and ingest into RACEN (pgvector)"
+    )
     p.add_argument("start_url", help="Starting URL (e.g., https://grest.in)")
     p.add_argument("--max-pages", type=int, default=500)
-    p.add_argument("--same-domain", action="store_true", help="Restrict crawl to the same domain as start_url")
-    p.add_argument("--rps", type=float, default=1.0, help="Requests per second (politeness)")
+    p.add_argument(
+        "--same-domain",
+        action="store_true",
+        help="Restrict crawl to the same domain",
+    )
+    p.add_argument(
+        "--rps",
+        type=float,
+        default=1.0,
+        help="Requests per second (politeness)",
+    )
     p.add_argument("--timeout", type=int, default=20)
-    p.add_argument("--dim", type=int, default=256, help="Embedding dimension for pgvector column")
+    p.add_argument("--retries", type=int, default=3)
+    p.add_argument(
+        "--include",
+        action="append",
+        default=[],
+        help="URL substring to include (can repeat)",
+    )
+    p.add_argument(
+        "--exclude",
+        action="append",
+        default=[],
+        help="URL substring to exclude (can repeat)",
+    )
+    p.add_argument(
+        "--dim",
+        type=int,
+        default=256,
+        help="Embedding dimension for pgvector column",
+    )
     args = p.parse_args()
 
     cfg = CrawlConfig(
@@ -40,10 +69,17 @@ def main() -> int:
         same_domain=args.same_domain or True,
         rate_limit_rps=args.rps,
         timeout=args.timeout,
+        retries=args.retries,
+        include_patterns=args.include or None,
+        exclude_patterns=args.exclude or None,
     )
 
     logger.info(
-        f"Crawl start: url={cfg.start_url} max_pages={cfg.max_pages} same_domain={cfg.same_domain} rps={cfg.rate_limit_rps}"
+        (
+            f"Crawl start: url={cfg.start_url} max_pages={cfg.max_pages} "
+            f"same_domain={cfg.same_domain} rps={cfg.rate_limit_rps} "
+            f"timeout={cfg.timeout} retries={cfg.retries}"
+        )
     )
     urls = crawl(cfg)
 
@@ -57,13 +93,19 @@ def main() -> int:
     for i, url in enumerate(urls, 1):
         try:
             res = ingest_url(url, embedding_dim=args.dim)
-            logger.info(f"[{i}/{len(urls)}] Ingested {url} -> doc_id={res.doc_id}, chunks={res.chunks_inserted}")
+            logger.info(
+                f"[{i}/{len(urls)}] Ingested {url} -> "
+                f"doc_id={res.doc_id}, chunks={res.chunks_inserted}"
+            )
             total_chunks += res.chunks_inserted
             total_emb += res.embeddings_inserted
         except Exception as e:
             logger.warning(f"Ingest failed for {url}: {e}")
 
-    logger.info(f"Crawl+Ingest complete: pages={len(urls)} chunks={total_chunks} embeddings={total_emb}")
+    logger.info(
+        f"Crawl+Ingest complete: pages={len(urls)} chunks={total_chunks} "
+        f"embeddings={total_emb}"
+    )
     return 0
 
 

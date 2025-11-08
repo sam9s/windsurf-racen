@@ -31,6 +31,15 @@ class DBConfig:
         )
 
 
+def embedding_exists(conn: psycopg.Connection, *, chunk_id: str) -> bool:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM embeddings WHERE chunk_id = %s LIMIT 1",
+            (chunk_id,),
+        )
+        return cur.fetchone() is not None
+
+
 def get_conn(cfg: Optional[DBConfig] = None) -> psycopg.Connection:
     cfg = cfg or DBConfig.from_env()
     logger.info(
