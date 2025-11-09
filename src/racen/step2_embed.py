@@ -43,9 +43,10 @@ class OpenAIEmbedder:
         text: str,
         metadata: Optional[dict] = None,
     ) -> EmbeddingResult:
-        if not self.api_key:
+        force_fallback = os.getenv("OPENAI_EMBED_FALLBACK", "0") in {"1", "true", "TRUE", "yes"}
+        if force_fallback or not self.api_key:
             logger.warning(
-                "OPENAI_API_KEY not set; using deterministic local fallback embedding"
+                "Using deterministic local fallback embedding"
             )
             vec = self._fallback_embed(text)
             return EmbeddingResult(
@@ -109,7 +110,15 @@ class OpenAIEmbedder:
                 backoff *= 2
             else:
                 logger.error(f"OpenAI embeddings error: {last_err}")
-                raise RuntimeError("OpenAI embeddings failed: retry_exhausted")
+                # Fallback to deterministic local embedding to keep pipeline functional
+                vec = self._fallback_embed(text)
+                return EmbeddingResult(
+                    id=id,
+                    vector=vec,
+                    model=f"{self.model}-fallback",
+                    dim=len(vec),
+                    meta=metadata or {},
+                )
 
         vec = data["data"][0]["embedding"]
         return EmbeddingResult(

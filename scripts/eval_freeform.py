@@ -113,6 +113,8 @@ def main() -> None:
     ap.add_argument("--md", required=True, help="Path to Grest_Use_Cases_Freeform.md")
     ap.add_argument("--out", default=str(ROOT / "outputs" / "eval_freeform_report.md"))
     ap.add_argument("--k", type=int, default=6, help="Top-k chunks to use for answering")
+    ap.add_argument("--limit", type=int, default=0, help="Evaluate only the first N questions (0 = all)")
+    ap.add_argument("--offset", type=int, default=0, help="Skip the first N questions before evaluating")
     args = ap.parse_args()
 
     md_path = Path(args.md)
@@ -120,6 +122,10 @@ def main() -> None:
         raise SystemExit(f"Markdown file not found: {md_path}")
 
     items = parse_markdown(md_path)
+    if args.offset and args.offset > 0:
+        items = items[args.offset :]
+    if args.limit and args.limit > 0:
+        items = items[: args.limit]
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -131,24 +137,35 @@ def main() -> None:
     passed = 0
 
     for idx, it in enumerate(items, 1):
-        ans, cits = answer_query(it.question, top_k=args.k)
-        urls = [c.url for c in cits]
-        ok, rule = match_pass(it.expected_hint, urls)
-        if ok:
-            passed += 1
         rows.append(f"## Q{idx}")
         rows.append(it.question)
         if it.expected_hint:
             rows.append(f"Expected: {it.expected_hint}")
         rows.append("")
-        rows.append("Answer:")
-        rows.append(ans)
-        rows.append("")
-        rows.append("Citations:")
-        for i, u in enumerate(urls, 1):
-            rows.append(f"- [{i}] {u}")
-        rows.append("")
-        rows.append(f"Result: {'PASS' if ok else 'FAIL'} ({rule})")
+        try:
+            ans, cits = answer_query(it.question, top_k=args.k)
+            urls = [c.url for c in cits]
+            ok, rule = match_pass(it.expected_hint, urls)
+            if ok:
+                passed += 1
+            rows.append("Answer:")
+            rows.append(ans)
+            rows.append("")
+            rows.append("Citations:")
+            for i, u in enumerate(urls, 1):
+                rows.append(f"- [{i}] {u}")
+            rows.append("")
+            rows.append(f"Result: {'PASS' if ok else 'FAIL'} ({rule})")
+        except Exception as e:
+            # Log and continue
+            logger.error(f"Error evaluating Q{idx}: {e}")
+            rows.append("Answer:")
+            rows.append(f"[ERROR] {e}")
+            rows.append("")
+            rows.append("Citations:")
+            rows.append("- [none]")
+            rows.append("")
+            rows.append("Result: ERROR")
         rows.append("")
 
     total = len(items)
