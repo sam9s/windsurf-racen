@@ -77,6 +77,8 @@ def ensure_schema(conn: psycopg.Connection, embedding_dim: int = 256) -> None:
               document_id TEXT REFERENCES documents(id) ON DELETE CASCADE,
               start_char INT,
               end_char INT,
+              start_line INT,
+              end_line INT,
               text TEXT
             )
             """
@@ -118,20 +120,24 @@ def upsert_chunk(
     document_id: str,
     start_char: int,
     end_char: int,
+    start_line: int,
+    end_line: int,
     text: str,
 ) -> None:
     with conn.cursor() as cur:
         cur.execute(
             """
-            INSERT INTO chunks (id, document_id, start_char, end_char, text)
-            VALUES (%s, %s, %s, %s, %s)
+            INSERT INTO chunks (id, document_id, start_char, end_char, start_line, end_line, text)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (id)
             DO UPDATE SET document_id = EXCLUDED.document_id,
                           start_char = EXCLUDED.start_char,
                           end_char = EXCLUDED.end_char,
+                          start_line = EXCLUDED.start_line,
+                          end_line = EXCLUDED.end_line,
                           text = EXCLUDED.text
             """,
-            (chunk_id, document_id, start_char, end_char, text),
+            (chunk_id, document_id, start_char, end_char, start_line, end_line, text),
         )
 
 

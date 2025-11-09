@@ -9,10 +9,17 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-# Load .env automatically if present
+# Load .env (prefer local env file used by this project)
 try:
     import dotenv  # type: ignore
-    dotenv.load_dotenv()
+    env_candidates = [
+        ROOT / "windsurf-racen-local" / ".env",
+        ROOT / ".env",
+    ]
+    for env_path in env_candidates:
+        if env_path.exists():
+            dotenv.load_dotenv(dotenv_path=env_path, override=False)
+            break
 except Exception:
     pass
 
