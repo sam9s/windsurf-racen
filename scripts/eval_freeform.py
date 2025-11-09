@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import sys
 from dataclasses import dataclass
+import time
+import statistics
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -135,6 +137,7 @@ def main() -> None:
     rows.append(f"Source: {md_path}")
     rows.append("")
     passed = 0
+    latencies_ms: List[float] = []
 
     for idx, it in enumerate(items, 1):
         rows.append(f"## Q{idx}")
@@ -143,7 +146,11 @@ def main() -> None:
             rows.append(f"Expected: {it.expected_hint}")
         rows.append("")
         try:
+            t0 = time.perf_counter()
             ans, cits = answer_query(it.question, top_k=args.k)
+            t1 = time.perf_counter()
+            elapsed_ms = (t1 - t0) * 1000.0
+            latencies_ms.append(elapsed_ms)
             urls = [c.url for c in cits]
             ok, rule = match_pass(it.expected_hint, urls)
             if ok:
@@ -154,6 +161,8 @@ def main() -> None:
             rows.append("Citations:")
             for i, u in enumerate(urls, 1):
                 rows.append(f"- [{i}] {u}")
+            rows.append("")
+            rows.append(f"Latency: {elapsed_ms:.0f} ms")
             rows.append("")
             rows.append(f"Result: {'PASS' if ok else 'FAIL'} ({rule})")
         except Exception as e:
@@ -170,6 +179,12 @@ def main() -> None:
 
     total = len(items)
     acc = (passed / total * 100.0) if total else 0.0
+    if latencies_ms:
+        avg_ms = statistics.mean(latencies_ms)
+        p50_ms = statistics.median(latencies_ms)
+        p90_ms = sorted(latencies_ms)[max(0, int(0.9 * len(latencies_ms)) - 1)]
+        rows.insert(0, f"Latency: avg={avg_ms:.0f} ms, p50={p50_ms:.0f} ms, p90={p90_ms:.0f} ms")
+        rows.insert(0, "")
     rows.insert(0, f"Accuracy: {passed}/{total} ({acc:.1f}%)")
     rows.insert(0, "")
 

@@ -213,6 +213,12 @@ def retrieve(query_text: str, top_k: int = 5) -> List[RetrievedChunk]:
     embedder = OpenAIEmbedder()
     conn = get_conn()
     try:
+        fast_mode = os.getenv("FAST_MODE", "0") in {"1", "true", "TRUE", "yes"}
+        # Bound reranker workload to keep latency predictable
+        try:
+            rerank_top_n = int(os.getenv("RERANK_TOP_N", "12"))
+        except Exception:
+            rerank_top_n = 12
         # Detect embedding dimension from DB (fallback to 256 if empty)
         expected_dim = 256
         with conn.cursor() as cur:
@@ -237,24 +243,28 @@ def retrieve(query_text: str, top_k: int = 5) -> List[RetrievedChunk]:
             query_text=query_text,
             query_vec=q_vec,
             top_k=top_k,
-            candidate_k=max(20, top_k * 4),
+            # Use a slightly smaller candidate set to reduce latency even with reranker
+            candidate_k=max(12, top_k * 3),
         )
         items = candidates
 
-        try:
-            from sentence_transformers import CrossEncoder  # type: ignore
+        if not fast_mode:
+            try:
+                from sentence_transformers import CrossEncoder  # type: ignore
 
-            model = CrossEncoder(
-                "cross-encoder/ms-marco-MiniLM-L-6-v2",
-                device="cpu",
-            )
-            pairs = [(query_text, it.text) for it in items]
-            scores = model.predict(pairs)
-            for it, sc in zip(items, scores):
-                it.score = float(sc)
-            items.sort(key=lambda x: x.score, reverse=True)
-        except Exception:
-            pass
+                model = CrossEncoder(
+                    "cross-encoder/ms-marco-MiniLM-L-6-v2",
+                    device="cpu",
+                )
+                # Only rerank top-N to keep latency bounded
+                items = items[:rerank_top_n]
+                pairs = [(query_text, it.text) for it in items]
+                scores = model.predict(pairs)
+                for it, sc in zip(items, scores):
+                    it.score = float(sc)
+                items.sort(key=lambda x: x.score, reverse=True)
+            except Exception:
+                pass
 
         return items[:top_k]
     finally:
