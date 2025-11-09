@@ -117,6 +117,26 @@ def main() -> None:
             cleaned = cleaner.clean(text)
             chunks = chunker.chunk(cleaned)
 
+            # Precompute line offsets for reliable line refs
+            # Reason: chunk metadata may not carry line numbers across cleaners/segmenters.
+            line_starts = [0]
+            for i, ch_ in enumerate(cleaned):
+                if ch_ == "\n":
+                    line_starts.append(i + 1)
+            def to_line(pos: int) -> int:
+                # Binary search could be used; linear scan is fine for these sizes
+                # Find largest index where line_starts[idx] <= pos, return idx+1
+                lo, hi = 0, len(line_starts) - 1
+                ans = 0
+                while lo <= hi:
+                    mid = (lo + hi) // 2
+                    if line_starts[mid] <= pos:
+                        ans = mid
+                        lo = mid + 1
+                    else:
+                        hi = mid - 1
+                return ans + 1
+
             document_id, source = doc_id_for(p)
             upsert_document(conn, doc_id=document_id, source=source)
 
@@ -130,8 +150,8 @@ def main() -> None:
                     document_id=document_id,
                     start_char=ch.start_char,
                     end_char=ch.end_char,
-                    start_line=int(ch.meta.get("start_line", 0)),
-                    end_line=int(ch.meta.get("end_line", 0)),
+                    start_line=to_line(ch.start_char),
+                    end_line=to_line(ch.end_char),
                     text=ch.text,
                 )
                 emb = embedder.embed(
