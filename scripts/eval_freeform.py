@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import sys
 from dataclasses import dataclass
+import os
 import time
 import statistics
 from pathlib import Path
@@ -28,6 +29,7 @@ except Exception:
     pass
 
 from racen.log import get_logger
+from racen.step3_retrieve import effective_settings
 from step4_answer import answer_query
 
 logger = get_logger("scripts.eval_freeform")
@@ -117,6 +119,19 @@ def main() -> None:
     ap.add_argument("--k", type=int, default=6, help="Top-k chunks to use for answering")
     ap.add_argument("--limit", type=int, default=0, help="Evaluate only the first N questions (0 = all)")
     ap.add_argument("--offset", type=int, default=0, help="Skip the first N questions before evaluating")
+    ap.add_argument(
+        "--expected",
+        action="append",
+        help=(
+            "Filter to only questions whose Expected hint matches one of the provided labels "
+            "(e.g., FAQs, Warranty, Returns, Shipping, Terms). Can be repeated."
+        ),
+    )
+    ap.add_argument(
+        "--allowlist",
+        default="",
+        help="Comma-separated source allowlist patterns (e.g., /pages/faqs,/policies/shipping/policy)",
+    )
     args = ap.parse_args()
 
     md_path = Path(args.md)
@@ -124,10 +139,19 @@ def main() -> None:
         raise SystemExit(f"Markdown file not found: {md_path}")
 
     items = parse_markdown(md_path)
+    # Optional filtering by Expected hint labels
+    if args.expected:
+        wanted = {s.strip() for s in args.expected if s and s.strip()}
+        if wanted:
+            items = [it for it in items if it.expected_hint in wanted]
     if args.offset and args.offset > 0:
         items = items[args.offset :]
     if args.limit and args.limit > 0:
         items = items[: args.limit]
+    # Force in-process allowlist if provided (ensures it's visible in effective settings)
+    if args.allowlist:
+        os.environ["RETRIEVE_SOURCE_ALLOWLIST"] = args.allowlist
+
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -136,6 +160,60 @@ def main() -> None:
     rows.append("")
     rows.append(f"Source: {md_path}")
     rows.append("")
+    # Settings snapshot for reproducibility
+    rows.append("## Settings")
+    rows.append(f"k: {args.k}")
+    rows.append(f"limit: {args.limit}")
+    rows.append(f"offset: {args.offset}")
+    rows.append(f"expected filter: {', '.join(args.expected) if args.expected else '[none]'}")
+    rows.append("")
+    rows.append("### Env (key retrieval/answering flags)")
+    def g(name: str, default: str = "") -> str:
+        try:
+            v = os.getenv(name)
+            return v if v is not None and v != "" else default
+        except Exception:
+            return default
+    rows.append(f"FAST_MODE: {g('FAST_MODE','[unset]')}")
+    rows.append(f"TOP_K: {g('TOP_K','[unset]')}")
+    rows.append(f"RERANK_TOP_N: {g('RERANK_TOP_N','[unset]')}")
+    rows.append(f"RETRIEVE_SOURCE_ALLOWLIST: {g('RETRIEVE_SOURCE_ALLOWLIST','[unset]')}")
+    rows.append(f"RETRIEVE_BACKOFF_ENABLE: {g('RETRIEVE_BACKOFF_ENABLE','[unset]')}")
+    rows.append(f"RETRIEVE_BACKOFF_THRESHOLD: {g('RETRIEVE_BACKOFF_THRESHOLD','[unset]')}")
+    rows.append(f"RETRIEVE_BACKOFF_SECONDARY: {g('RETRIEVE_BACKOFF_SECONDARY','[unset]')}")
+    rows.append(f"HNSW_EF_SEARCH: {g('HNSW_EF_SEARCH','[unset]')}")
+    rows.append(f"EMBED_MODEL: {g('EMBED_MODEL','[unset]')}")
+    rows.append(f"EMBED_DIM: {g('EMBED_DIM','[unset]')}")
+    rows.append(f"OPENAI_MODEL: {g('OPENAI_MODEL','[unset]')}")
+    rows.append(f"OPENAI_BASE_URL: {g('OPENAI_BASE_URL','[unset]')}")
+    rows.append(f"PGHOST: {g('PGHOST','[unset]')}")
+    rows.append(f"PGPORT: {g('PGPORT','[unset]')}")
+    rows.append(f"PGDATABASE: {g('PGDATABASE','[unset]')}")
+    # Answer shaping and DB schema hints
+    rows.append(f"ANSWER_SHORT: {g('ANSWER_SHORT','[unset]')}")
+    rows.append(f"ANSWER_MAX_TOKENS: {g('ANSWER_MAX_TOKENS','[unset]')}")
+    rows.append(f"ANSWER_CHUNK_CHAR_BUDGET: {g('ANSWER_CHUNK_CHAR_BUDGET','[unset]')}")
+    rows.append(f"PGOPTIONS: {g('PGOPTIONS','[unset]')}")
+    rows.append("")
+    # Include effective retriever settings with parsed fields
+    try:
+        eff = effective_settings()
+        rows.append("### Effective retriever settings")
+        for kname in [
+            "FAST_MODE",
+            "RERANK_TOP_N",
+            "RETRIEVE_SOURCE_ALLOWLIST",
+            "parsed_allowlist",
+            "RETRIEVE_BACKOFF_ENABLE",
+            "RETRIEVE_BACKOFF_THRESHOLD",
+            "RETRIEVE_BACKOFF_SECONDARY",
+            "parsed_backoff_secondary",
+            "PGOPTIONS",
+        ]:
+            rows.append(f"{kname}: {eff.get(kname, '[unset]')}")
+        rows.append("")
+    except Exception:
+        pass
     passed = 0
     latencies_ms: List[float] = []
 

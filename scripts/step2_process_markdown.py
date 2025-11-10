@@ -103,8 +103,39 @@ def main() -> None:
     try:
         ensure_schema(conn, embedding_dim=1536)
 
-        cleaner = Cleaner()
-        chunker = Chunker(max_tokens=500, overlap_tokens=50)
+        # Select cleaner/chunker mode
+        import os
+        doc_cleaner = os.getenv("DOC_CLEANER", "basic").lower()
+        try:
+            max_tokens = int(os.getenv("DOC_CHUNK_MAX_TOKENS", "500"))
+        except Exception:
+            max_tokens = 500
+        try:
+            overlap_tokens = int(os.getenv("DOC_CHUNK_OVERLAP", "50"))
+        except Exception:
+            overlap_tokens = 50
+
+        if doc_cleaner == "docling":
+            # Require actual Docling package; fail fast if missing
+            try:
+                import importlib  # type: ignore
+
+                spec = getattr(importlib, "util").find_spec("docling")  # type: ignore[attr-defined]
+            except Exception:
+                spec = None
+            if spec is None:
+                raise RuntimeError(
+                    "DOC_CLEANER=docling requested but 'docling' package is not installed. "
+                    "Please install it (e.g., pip install docling) and re-run."
+                )
+            # Defer imports until needed to avoid hard dependency when not in docling mode
+            from docling.document_converter import DocumentConverter  # type: ignore
+            from docling.chunking import HybridChunker  # type: ignore
+            cleaner = None  # sentinel to branch per-file processing
+            chunker = (DocumentConverter, HybridChunker)
+        else:
+            cleaner = Cleaner()
+            chunker = Chunker(max_tokens=max_tokens, overlap_tokens=overlap_tokens)
         embedder = OpenAIEmbedder(
             model="text-embedding-3-small"
         )
@@ -112,30 +143,58 @@ def main() -> None:
         for fp in files:
             p = Path(fp)
             logger.info(f"Processing {p.name}")
-            text = p.read_text(encoding="utf-8", errors="ignore")
+            # When in docling mode, use DocumentConverter + HybridChunker
+            if doc_cleaner == "docling":
+                DocumentConverter, HybridChunker = chunker  # type: ignore[assignment]
+                dl_doc = DocumentConverter().convert(source=str(p)).document
+                dl_chunker = HybridChunker()
 
-            cleaned = cleaner.clean(text)
-            chunks = chunker.chunk(cleaned)
+                # Wrap results into objects compatible with downstream usage
+                class _C:
+                    __slots__ = ("text", "start_char", "end_char")
 
-            # Precompute line offsets for reliable line refs
-            # Reason: chunk metadata may not carry line numbers across cleaners/segmenters.
-            line_starts = [0]
-            for i, ch_ in enumerate(cleaned):
-                if ch_ == "\n":
-                    line_starts.append(i + 1)
-            def to_line(pos: int) -> int:
-                # Binary search could be used; linear scan is fine for these sizes
-                # Find largest index where line_starts[idx] <= pos, return idx+1
-                lo, hi = 0, len(line_starts) - 1
-                ans = 0
-                while lo <= hi:
-                    mid = (lo + hi) // 2
-                    if line_starts[mid] <= pos:
-                        ans = mid
-                        lo = mid + 1
-                    else:
-                        hi = mid - 1
-                return ans + 1
+                    def __init__(self, text: str, start_char: int, end_char: int) -> None:
+                        self.text = text
+                        self.start_char = start_char
+                        self.end_char = end_char
+
+                chunks = []
+                cursor = 0
+                for dl_chunk in dl_chunker.chunk(dl_doc=dl_doc):
+                    enriched = dl_chunker.contextualize(chunk=dl_chunk)
+                    start_char = cursor
+                    end_char = start_char + len(enriched)
+                    chunks.append(_C(enriched, start_char, end_char))
+                    # maintain small overlap consistent with configured overlap_tokens
+                    # Reason: preserve some continuity for retrieval without exploding chunk count
+                    overlap_chars = max(0, overlap_tokens * 4)
+                    cursor = end_char - min(overlap_chars, len(enriched))
+            else:
+                text = p.read_text(encoding="utf-8", errors="ignore")
+                cleaned = cleaner.clean(text)  # type: ignore[union-attr]
+                chunks = chunker.chunk(cleaned)  # type: ignore[union-attr]
+
+            # Precompute line offsets for reliable line refs (only in non-docling mode)
+            if doc_cleaner != "docling":
+                line_starts = [0]
+                for i, ch_ in enumerate(cleaned):
+                    if ch_ == "\n":
+                        line_starts.append(i + 1)
+                def to_line(pos: int) -> int:
+                    # Find largest index where line_starts[idx] <= pos, return idx+1
+                    lo, hi = 0, len(line_starts) - 1
+                    ans = 0
+                    while lo <= hi:
+                        mid = (lo + hi) // 2
+                        if line_starts[mid] <= pos:
+                            ans = mid
+                            lo = mid + 1
+                        else:
+                            hi = mid - 1
+                    return ans + 1
+            else:
+                def to_line(pos: int) -> int:  # type: ignore[no-redef]
+                    return 0
 
             document_id, source = doc_id_for(p)
             upsert_document(conn, doc_id=document_id, source=source)
@@ -150,8 +209,8 @@ def main() -> None:
                     document_id=document_id,
                     start_char=ch.start_char,
                     end_char=ch.end_char,
-                    start_line=to_line(ch.start_char),
-                    end_line=to_line(ch.end_char),
+                    start_line=to_line(ch.start_char) if doc_cleaner != "docling" else 0,
+                    end_line=to_line(ch.end_char) if doc_cleaner != "docling" else 0,
                     text=ch.text,
                 )
                 emb = embedder.embed(
@@ -166,7 +225,11 @@ def main() -> None:
                     model=emb.model,
                     embedding_dim=1536,
                 )
-            logger.info(f"Wrote {len(chunks)} chunks for {p.name}")
+            # Post-ingest per-document stats
+            avg_len = int(sum(len(c.text) for c in chunks) / max(1, len(chunks)))
+            logger.info(
+                f"Wrote {len(chunks)} chunks for {p.name} | avg_chars={avg_len} max_tokens={max_tokens} overlap_tokens={overlap_tokens}"
+            )
     finally:
         conn.close()
 

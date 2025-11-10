@@ -248,6 +248,42 @@ def retrieve(query_text: str, top_k: int = 5) -> List[RetrievedChunk]:
         )
         items = candidates
 
+        # Accuracy-first backoff: expand sources if low-confidence
+        backoff_enabled = os.getenv("RETRIEVE_BACKOFF_ENABLE", "0") in {"1", "true", "TRUE", "yes"}
+        try:
+            backoff_threshold = float(os.getenv("RETRIEVE_BACKOFF_THRESHOLD", "0.35"))
+        except Exception:
+            backoff_threshold = 0.35
+        secondary_env = os.getenv("RETRIEVE_BACKOFF_SECONDARY", "").strip()
+        secondary_patterns = [p for p in (s.strip() for s in secondary_env.split(",")) if p]
+
+        # Determine confidence on fused pre-rerank scores
+        base_max = 0.0
+        if candidates:
+            base_max = max(it.score for it in candidates)
+
+        do_backoff = backoff_enabled and secondary_patterns and (base_max < backoff_threshold)
+        if do_backoff:
+            old_allow = os.getenv("RETRIEVE_SOURCE_ALLOWLIST", "")
+            primary_patterns = [p for p in (s.strip() for s in old_allow.split(",")) if p]
+            combined = ",".join(primary_patterns + secondary_patterns)
+            os.environ["RETRIEVE_SOURCE_ALLOWLIST"] = combined
+            try:
+                # Broaden search space and gather a fresh candidate set
+                expanded = search_hybrid(
+                    conn,
+                    query_text=query_text,
+                    query_vec=q_vec,
+                    top_k=top_k,
+                    candidate_k=max(16, top_k * 4),
+                )
+                items = expanded
+                # Force reranker ON for backoff (accuracy-first)
+                fast_mode = False
+            finally:
+                # Restore original allowlist
+                os.environ["RETRIEVE_SOURCE_ALLOWLIST"] = old_allow
+
         if not fast_mode:
             try:
                 from sentence_transformers import CrossEncoder  # type: ignore
@@ -269,3 +305,36 @@ def retrieve(query_text: str, top_k: int = 5) -> List[RetrievedChunk]:
         return items[:top_k]
     finally:
         conn.close()
+
+
+def effective_settings() -> dict:
+    """Return effective retrieval settings and parsed values for reporting.
+
+    Returns:
+        dict: A dictionary with env strings and parsed lists/bools used by retrieval.
+    """
+    allow_env = os.getenv("RETRIEVE_SOURCE_ALLOWLIST", "").strip()
+    allow_list = [p for p in (s.strip() for s in allow_env.split(",")) if p]
+    fast_mode = os.getenv("FAST_MODE", "0") in {"1", "true", "TRUE", "yes"}
+    try:
+        rerank_top_n = int(os.getenv("RERANK_TOP_N", "12"))
+    except Exception:
+        rerank_top_n = 12
+    backoff_enabled = os.getenv("RETRIEVE_BACKOFF_ENABLE", "0") in {"1", "true", "TRUE", "yes"}
+    try:
+        backoff_threshold = float(os.getenv("RETRIEVE_BACKOFF_THRESHOLD", "0.35"))
+    except Exception:
+        backoff_threshold = 0.35
+    secondary_env = os.getenv("RETRIEVE_BACKOFF_SECONDARY", "").strip()
+    secondary_list = [p for p in (s.strip() for s in secondary_env.split(",")) if p]
+    return {
+        "RETRIEVE_SOURCE_ALLOWLIST": allow_env,
+        "parsed_allowlist": allow_list,
+        "FAST_MODE": str(int(fast_mode)),
+        "RERANK_TOP_N": str(rerank_top_n),
+        "RETRIEVE_BACKOFF_ENABLE": str(int(backoff_enabled)),
+        "RETRIEVE_BACKOFF_THRESHOLD": str(backoff_threshold),
+        "RETRIEVE_BACKOFF_SECONDARY": secondary_env,
+        "parsed_backoff_secondary": secondary_list,
+        "PGOPTIONS": os.getenv("PGOPTIONS", ""),
+    }
