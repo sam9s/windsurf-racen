@@ -77,9 +77,37 @@ def ensure_schema(conn: psycopg.Connection, embedding_dim: int = 256) -> None:
               document_id TEXT REFERENCES documents(id) ON DELETE CASCADE,
               start_char INT,
               end_char INT,
+              start_line INT,
+              end_line INT,
               text TEXT
             )
             """
+        )
+        # Ensure FTS column and index for text search (compatible with older Postgres)
+        cur.execute(
+            """
+            SELECT 1 FROM information_schema.columns
+            WHERE table_schema = current_schema()
+              AND table_name = 'chunks'
+              AND column_name = 'fts'
+            """
+        )
+        has_fts = cur.fetchone() is not None
+        if not has_fts:
+            cur.execute("ALTER TABLE chunks ADD COLUMN fts tsvector")
+        # Populate or refresh fts (safe, idempotent)
+        try:
+            cur.execute("UPDATE chunks SET fts = to_tsvector('english', coalesce(text,''))")
+        except Exception:
+            pass
+        # Create GIN index if missing
+        cur.execute(
+            (
+                "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_class c "
+                "JOIN pg_namespace n ON n.oid = c.relnamespace "
+                "WHERE c.relname = 'idx_chunks_fts' AND n.nspname = current_schema()) THEN "
+                "CREATE INDEX idx_chunks_fts ON chunks USING GIN (fts); END IF; END $$;"
+            )
         )
         cur.execute(
             f"""
@@ -118,21 +146,34 @@ def upsert_chunk(
     document_id: str,
     start_char: int,
     end_char: int,
+    start_line: int,
+    end_line: int,
     text: str,
 ) -> None:
     with conn.cursor() as cur:
         cur.execute(
             """
-            INSERT INTO chunks (id, document_id, start_char, end_char, text)
-            VALUES (%s, %s, %s, %s, %s)
+            INSERT INTO chunks (id, document_id, start_char, end_char, start_line, end_line, text)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (id)
             DO UPDATE SET document_id = EXCLUDED.document_id,
                           start_char = EXCLUDED.start_char,
                           end_char = EXCLUDED.end_char,
+                          start_line = EXCLUDED.start_line,
+                          end_line = EXCLUDED.end_line,
                           text = EXCLUDED.text
             """,
-            (chunk_id, document_id, start_char, end_char, text),
+            (chunk_id, document_id, start_char, end_char, start_line, end_line, text),
         )
+        # Maintain FTS column in sync with text (no trigger to keep it simple and explicit)
+        try:
+            cur.execute(
+                "UPDATE chunks SET fts = to_tsvector('english', coalesce(text,'')) WHERE id = %s",
+                (chunk_id,),
+            )
+        except Exception:
+            # If FTS column isn't present (older schema), ignore silently
+            pass
 
 
 def upsert_embedding(

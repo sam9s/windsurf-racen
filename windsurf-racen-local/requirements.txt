@@ -1,0 +1,5 @@
+fastapi==0.115.0
+uvicorn==0.30.6
+markitdown==0.0.1a3
+python-dotenv==1.0.1
+requests==2.32.3

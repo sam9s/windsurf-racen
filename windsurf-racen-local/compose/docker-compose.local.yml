@@ -1,17 +1,20 @@
 version: "3.8"
 services:
-  crawl4ai:
-    image: ghcr.io/crawl4ai/crawl4ai:latest
-    environment:
-      - LOG_LEVEL=info
-      - CRAWL_MAX_CONCURRENCY=4
-      - CRAWL_RPS=1
-    ports:
-      - "8081:8080"
-    restart: unless-stopped
+  # crawl4ai:
+  #   image: ghcr.io/crawl4ai/crawl4ai:latest
+  #   environment:
+  #     - LOG_LEVEL=info
+  #     - CRAWL_MAX_CONCURRENCY=4
+  #     - CRAWL_RPS=1
+  #   ports:
+  #     - "8081:8080"
+  #   restart: unless-stopped
 
   markitdown-mcp:
-    image: mcp/markitdown:latest
+    build:
+      context: "J:/My Drive/Windsurf Projects/CascadeProjects/windsurf-project/markitdown-main/packages/markitdown-mcp"
+      dockerfile: Dockerfile
+    container_name: markitdown-mcp
     environment:
       - WORKERS=2
       - MAX_UPLOAD_MB=25
