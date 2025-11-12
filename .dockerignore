@@ -1,0 +1,25 @@
+# Exclude local virtual envs and caches
+.venv/
+**/__pycache__/
+*.pyc
+
+# Git
+.git/
+.gitignore
+
+# Node artifacts
+node_modules/
+**/node_modules/
+
+# IDE/editor
+.vscode/
+.idea/
+
+# Large outputs and temp
+outputs/
+*.log
+*.tmp
+
+# OS
+.DS_Store
+Thumbs.db
