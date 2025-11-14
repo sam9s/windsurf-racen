@@ -66,6 +66,8 @@ def ingest_url(
             document_id=did,
             start_char=ch.start_char,
             end_char=ch.end_char,
+            start_line=ch.meta.get("start_line", 0),
+            end_line=ch.meta.get("end_line", 0),
             text=ch.text,
         )
         c_ins += 1

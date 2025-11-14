@@ -43,6 +43,9 @@ def _compose_prompt(query: str, chunks: List[RetrievedChunk]) -> str:
     short = os.getenv("ANSWER_SHORT", "0") in {"1", "true", "TRUE", "yes"}
     lines.append("You are a support assistant for GREST. Answer ONLY using the provided context.")
     lines.append("If the answer is not present in the context, reply: 'Not found in sources provided.'")
+    match_lang = os.getenv("ANSWER_MATCH_INPUT_LANGUAGE", "0") in {"1", "true", "TRUE", "yes"}
+    if match_lang:
+        lines.append("Mirror the user's language and style. If the input is Hinglish (Hindi + English), respond in Hinglish.")
     if short:
         lines.append("Cite minimally like [1] and add a compact Citations list.")
     else:
