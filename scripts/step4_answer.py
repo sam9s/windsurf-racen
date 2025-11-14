@@ -131,6 +131,17 @@ def _compose_prompt(query: str, chunks: List[RetrievedChunk], intent: str = "", 
     lines.append(
         "If replying in Hinglish, avoid appending a full English sentence at the end; keep tone consistent."
     )
+    # Emoji tone control via env
+    try:
+        emoji_level = int(os.getenv("PERSONA_EMOJI_LEVEL", "0"))
+    except Exception:
+        emoji_level = 0
+    if emoji_level <= 0:
+        lines.append("Use no emojis unless the user uses them explicitly.")
+    elif emoji_level == 1:
+        lines.append("You may use up to 1 subtle emoji (e.g., 🙂, ✅) only when the topic is informal or cheerful; avoid in serious topics like refunds/escalations.")
+    else:
+        lines.append("You may use up to 2 subtle emojis when the tone is clearly informal; avoid emojis in serious topics like complaints, denials, or escalations.")
     # Instruct the model to propose helpful follow-ups when enabled
     followups_on = os.getenv("ANSWER_FOLLOWUPS_ENABLE", "1") in {"1", "true", "TRUE", "yes"}
     if followups_on:
@@ -246,6 +257,13 @@ def _detect_intent(query: str) -> str:
         return "policy"
     if "contact" in q or "support" in q or "help" in q:
         return "contact"
+    # order/buy intent (broad coverage for EN + Hinglish)
+    buy_signals = [
+        "order", "buy", "purchase", "checkout", "cart", "place order",
+        "kharid", "kharidna", "order kaise", "kaise karun", "kaise karu", "order karu"
+    ]
+    if any(sig in q for sig in buy_signals):
+        return "order_buy"
     return "general"
 
 
@@ -327,6 +345,8 @@ def answer_query(query: str, top_k: int = 6, previous_answer: str = "") -> tuple
         aug = " policy terms conditions"
     elif intent == "contact":
         aug = " contact support phone email"
+    elif intent == "order_buy":
+        aug = " order buy purchase checkout cart payment how to buy place order"
     aug_query = (query + aug).strip()
 
     # Retrieve
