@@ -44,12 +44,14 @@ class AnswerRequest(BaseModel):
         allowlist (Optional[str]): Comma-separated source allowlist patterns.
         k (Optional[int]): Top-k chunks to retrieve. Defaults to 10 if unset.
         short (Optional[bool]): If true, shorter answers and smaller chunks are used.
+        previous_answer (Optional[str]): The last assistant reply in this thread, if any, to help the LLM interpret acknowledgements.
     """
 
     question: str = Field(..., min_length=1)
     allowlist: Optional[str] = Field(default=None)
     k: Optional[int] = Field(default=None, ge=1, le=50)
     short: Optional[bool] = Field(default=None)
+    previous_answer: Optional[str] = Field(default=None)
 
 
 class CitationOut(BaseModel):
@@ -118,7 +120,7 @@ def answer(req: AnswerRequest) -> AnswerResponse:
 
     k = req.k if req.k is not None else int(os.getenv("TOP_K", "10"))
 
-    text, cits = answer_query(req.question, top_k=k)
+    text, cits = answer_query(req.question, top_k=k, previous_answer=(req.previous_answer or ""))
 
     eff = effective_settings()
     ribbon = (

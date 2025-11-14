@@ -3,6 +3,18 @@
 Date: 2025-11-13
 Time: 14:30 IST (UTC+05:30)
 
+## Vision (How RACEN should feel)
+- GPT-like conversational experience: mirror user language/style (incl. Hinglish), concise, helpful.
+- Grounded-first answers with citations; never fabricate specifics. Clearly note when exact facts aren’t present.
+- Best‑effort behavior: provide closest relevant info with disclaimers and strong guardrails.
+- Intelligent follow-ups on every answer (success and no‑exact‑answer), focused on user goal and next best actions.
+- Minimal friction operations: Slack-first workflows (ingest URL, status), auditable settings ribbon, clear source labeling for External data.
+
+## Guiding Principle
+- **No hardcoding of conversational logic.** RACEN must feel like GPT: dynamic, intent-aware, language-mirroring, and context-driven.
+- **Slack bot remains thin.** All behavior (follow-ups, acknowledgements, action offers) is LLM-led via backend prompts and retrieval guardrails.
+- **Thread awareness via `previous_answer`.** The backend provides the last assistant reply to the LLM so short acknowledgements (e.g., “haan ji”, “yes please”) are interpreted naturally without regex.
+
 ## Scope
 - High-accuracy, grounded Q&A over GREST core site pages with citations.
 - Slack bot wired to local Answer API for internal testing (Socket Mode).
@@ -55,7 +67,17 @@ DONE/Complete
 - Core ingestion complete for 9 /pages/* plus 3 /policies/* (see docs/SANITY_COMMANDS.md for queries).
 - Hinglish mirroring enabled (ANSWER_MATCH_INPUT_LANGUAGE=1) and verified via Slack.
 DONE/Complete
-\- Early Slack tests: FAQs, warranty, returns policy questions grounded; some “timeline” queries lack explicit facts (by-site), which is correct behavior for grounded mode.
+- Best‑effort fallback implemented; intent‑based follow‑ups appended to answers.
+DONE/Complete
+-\- Early Slack tests: FAQs, warranty, returns policy questions grounded; some “timeline” queries lack explicit facts (by-site), which is correct behavior for grounded mode.
+DONE/Complete
+- LLM-driven acknowledgements enabled using `previous_answer`; Slack-side regex handler removed to avoid hardcoding.
+DONE/Complete
+- Persona v1 integrated (env-driven):
+  - System prompt loader: PERSONA_SYSTEM_PROMPT_PATH → included at top of prompt.
+  - Lexicon reply shaper (first paragraph only): PERSONA_LEXICON_PATH.
+  - Tone unit tests runner added: scripts/persona_test.py (PERSONA_TONE_TESTS_PATH).
+  - Slack npm script: `yarn persona:test`.
 
 ## Plan for next 5 steps
 1) Answer behavior (best‑effort + follow‑ups)
@@ -63,6 +85,17 @@ DONE/Complete
    - Slightly expand `ANSWER_CHUNK_CHAR_BUDGET` (e.g., 1800) to include nearby clarifiers.
    - Add 2–3 intent‑based follow‑up suggestions to every answer (success and no‑exact‑answer).
    - Ribbon shows fallback and follow‑ups flags for audit.
+
+   Sub‑plan (micro steps for follow‑ups and contact details)
+    - DONE/Complete: Enable language mirroring (Hinglish/English) via `ANSWER_MATCH_INPUT_LANGUAGE=1`.
+    - DONE/Complete: Add intent‑based follow‑ups appended to every answer.
+    - DONE/Complete: Provide support details from env or `/pages/contact-us` (LLM-led acknowledgements, no Slack regex).
+      - `SUPPORT_PHONE`, `SUPPORT_EMAIL`, `SUPPORT_ADDRESS` configured in backend `.env`.
+    - DONE/Complete: Persona v1 wired (system prompt + lexicon), tone tests added.
+    - Planned (Option C – later, best long‑term):
+      - Create `contact_facts` table (key, value, source_url, extracted_at, confidence).
+      - Backfill from existing `docling.chunks` (no re‑ingest required).
+      - Update facts during future ingests.
 
 2) Ops ergonomics (Slack ingest)
    - Slack “Ingest URL” action + `/racen-ingest <url>` slash command for internal users.
@@ -88,6 +121,10 @@ DONE/Complete
 - Embeddings: OpenAI `text-embedding-3-small` (1536-d); DB vector(1536); disable local 256-d providers.
 - Slack preset: default to full-site for internal testing; scope can be narrowed per intent later.
 - Settings tracking: `.env` is the source of truth; changes mirrored when Slack/app settings are adjusted.
+- Persona config is env-driven (no hardcoding):
+  - PERSONA_SYSTEM_PROMPT_PATH
+  - PERSONA_LEXICON_PATH
+  - PERSONA_TONE_TESTS_PATH
 - Git policy: snapshot branches maintained; commit Answer API, scripts, tests, and README updates before feature jumps.
 
 ## Ingestion Strategy
@@ -99,6 +136,7 @@ DONE/Complete
 - Keep Google Drive sync paused during heavy runs; unpause to sync reports/changes when idle.
 - Local caches for HF/Transformers/Torch should stay on local disk (C:\ml-cache) to avoid Drive contention.
 - Use uvicorn --reload during local API development; restart Slack bot after env/code changes.
+- Run persona tone tests from Slack bot folder: `yarn persona:test`.
 
 ## Next Actions Checklist
 DONE/Complete
@@ -106,6 +144,10 @@ DONE/Complete
 - Validate Slack answers with citations from newly ingested pages.
 DONE/Complete
 - Implement best-effort fallback + follow-up suggestions.
+- Persona v1 integrated (system prompt + lexicon + tone tests; Slack script).
+Pending
+- Fix remaining lints/formatting in `scripts/step4_answer.py` (imports/line length).
+- Prepare PR: “RACEN Persona v1 — System Prompt + Lexicon + Reply Shaper”.
 - Add Slack “Ingest URL” action/slash command; backend enqueues crawl_and_ingest and reports status.
 - Optionally ingest Trustpilot page(s) for reputation queries (clearly labeled as External).
 - Plan product pages ingestion and Slack-friendly rendering; outline Web UI for richer cards/images.

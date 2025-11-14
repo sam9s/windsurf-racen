@@ -2,11 +2,68 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List
+
+
+def _read_text_file(path_str: str) -> str:
+    try:
+        p = Path(path_str)
+        if p.exists() and p.is_file():
+            return p.read_text(encoding="utf-8", errors="ignore").strip()
+    except Exception:
+        pass
+    return ""
+
+def _read_lexicon(path_str: str) -> dict:
+    try:
+        import yaml  # type: ignore
+
+        p = Path(path_str)
+        if p.exists() and p.is_file():
+            with p.open("r", encoding="utf-8", errors="ignore") as f:
+                return yaml.safe_load(f) or {}
+    except Exception:
+        return {}
+    return {}
+
+def _detect_mode(text: str) -> str:
+    t = (text or "").lower()
+    # naive signals for Hinglish
+    hinges = ["hai", "hain", "hoon", "sakti", "sakun", "karo", "kariye", "aap", "ji", "nahi", "haa"]
+    if any(w in t for w in hinges):
+        return "HI_EN"
+    return "EN"
+
+def _shape_first_paragraph(answer: str, mode: str, lex: dict) -> str:
+    if not answer or not lex:
+        return answer
+    parts = answer.split("\n\n", 1)
+    first = parts[0]
+    rest = parts[1] if len(parts) > 1 else ""
+    modes = (lex.get("modes") or {})
+    cfg = modes.get(mode) or {}
+    reps = cfg.get("replacements") or {}
+    forbidden = cfg.get("forbidden") or []
+    # apply replacements (simple, whole-phrase case-insensitive)
+    for k, v in reps.items():
+        try:
+            first = re.sub(rf"\b{re.escape(k)}\b", v, first, flags=re.IGNORECASE)
+        except re.error:
+            # fallback literal replace
+            first = first.replace(k, v)
+    # remove forbidden phrases
+    for phrase in forbidden:
+        first = first.replace(phrase, "")
+    shaped = first.strip()
+    if rest:
+        return shaped + "\n\n" + rest
+    return shaped
+ 
 
 # Ensure local 'src' is importable
 ROOT = Path(__file__).resolve().parents[1]
@@ -38,19 +95,79 @@ class Citation:
     end_line: int
 
 
-def _compose_prompt(query: str, chunks: List[RetrievedChunk]) -> str:
+def _compose_prompt(query: str, chunks: List[RetrievedChunk], intent: str = "", previous_answer: str = "") -> str:
     lines: List[str] = []
+    # Persona: prepend system prompt if provided
+    persona_path = os.getenv(
+        "PERSONA_SYSTEM_PROMPT_PATH",
+        str(
+            ROOT
+            / ".."
+            / "Grest_RACEN_Slack_Bot"
+            / "slack-openai-bot"
+            / "Persona"
+            / "system_prompt.md"
+        ),
+    )
+    persona_text = _read_text_file(persona_path)
+    if persona_text:
+        lines.append("Persona:")
+        lines.append(persona_text)
+        lines.append("")
     short = os.getenv("ANSWER_SHORT", "0") in {"1", "true", "TRUE", "yes"}
     lines.append("You are a support assistant for GREST. Answer ONLY using the provided context.")
     lines.append("If the answer is not present in the context, reply: 'Not found in sources provided.'")
     match_lang = os.getenv("ANSWER_MATCH_INPUT_LANGUAGE", "0") in {"1", "true", "TRUE", "yes"}
     if match_lang:
-        lines.append("Mirror the user's language and style. If the input is Hinglish (Hindi + English), respond in Hinglish.")
+        lines.append(
+            "Mirror the user's language and style closely. Prefer the user's language; avoid mixing languages unless the user mixes them."
+        )
+        lines.append(
+            "If the input is Hinglish (Hindi + English), respond in Hinglish. Use a female first-person voice (e.g., 'main madad kar sakti hoon')."
+        )
+    else:
+        lines.append("Use a female first-person voice (e.g., 'main madad kar sakti hoon').")
+    # Avoid trailing full-English sentences in Hinglish replies
+    lines.append(
+        "If replying in Hinglish, avoid appending a full English sentence at the end; keep tone consistent."
+    )
+    # Instruct the model to propose helpful follow-ups when enabled
+    followups_on = os.getenv("ANSWER_FOLLOWUPS_ENABLE", "1") in {"1", "true", "TRUE", "yes"}
+    if followups_on:
+        lines.append(
+            "After answering, naturally suggest 1-2 next helpful things you can do, phrased conversationally as part of the reply (no headers or bullet lists)."
+        )
+        lines.append(
+            "If contacting support may help, optionally offer to share the support phone/email (do not invent details)."
+        )
+    # Provide the previous assistant message to help the model interpret short acknowledgements
+    if previous_answer:
+        lines.append("If your previous reply offered to take an action (e.g., share support details) and the user's current message indicates consent/acknowledgement in any language, proceed and respond naturally.")
     if short:
         lines.append("Cite minimally like [1] and add a compact Citations list.")
     else:
         lines.append("Cite evidence inline like [1], [2] and provide a final Citations list.")
+    # Support contact guardrails
+    lines.append(
+        "For any phone/email/contact details, NEVER invent names or numbers. Only use details present in the provided context or authoritative support facts."
+    )
+    lines.append(
+        "If sharing support details, keep them concise and natural, and ensure they can be traced to on-site sources (e.g., /pages/contact-us)."
+    )
     lines.append("")
+    # Inject authoritative support facts from env when available
+    support_phone = (os.getenv("SUPPORT_PHONE", "") or "").strip()
+    support_email = (os.getenv("SUPPORT_EMAIL", "") or "").strip()
+    support_address = (os.getenv("SUPPORT_ADDRESS", "") or "").strip()
+    if any([support_phone, support_email, support_address]):
+        lines.append("Authoritative support facts (from system configuration):")
+        if support_phone:
+            lines.append(f"- Support phone: {support_phone}")
+        if support_email:
+            lines.append(f"- Support email: {support_email}")
+        if support_address:
+            lines.append(f"- Support address: {support_address}")
+        lines.append("")
     lines.append("Question:")
     lines.append(query)
     lines.append("")
@@ -117,10 +234,105 @@ def _call_openai(prompt: str, max_retries: int = 3, model: str = "gpt-4o-mini") 
     return "Not found in sources provided."
 
 
-def answer_query(query: str, top_k: int = 6) -> tuple[str, List[Citation]]:
+def _detect_intent(query: str) -> str:
+    q = (query or "").lower()
+    if any(k in q for k in ["return", "refund", "cancel", "exchange"]):
+        return "returns"
+    if "warranty" in q or "guarantee" in q:
+        return "warranty"
+    if "ship" in q or "delivery" in q or "international" in q:
+        return "shipping"
+    if "privacy" in q or "data" in q or "terms" in q:
+        return "policy"
+    if "contact" in q or "support" in q or "help" in q:
+        return "contact"
+    return "general"
+
+
+def _clean_snippet(text: str) -> str:
+    t = text or ""
+    t = re.sub(r"!\[[^\]]*\]\([^)]*\)", " ", t)
+    t = re.sub(r"<[^>]+>", " ", t)
+    t = re.sub(r"\bhttps?://\S+", " ", t)
+    # Remove tel: links and map-like query crumbs
+    t = re.sub(r"tel:\S+", " ", t, flags=re.IGNORECASE)
+    t = re.sub(r"\b(entry=ttu|g_ep=|hl=|utm_[a-z]+)=\S+", " ", t, flags=re.IGNORECASE)
+    # Drop percent-encoded noise-heavy tokens
+    t = re.sub(r"(?:%[0-9A-Fa-f]{2}){4,}", " ", t)
+    lines = []
+    for ln in t.splitlines():
+        if any(k in ln for k in ["{", "}", ": ", ";", "position:", "margin", "padding", "width:", "height:"]):
+            continue
+        # Skip lines that are mostly URL-ish or numeric codes
+        if len(re.findall(r"[/:%&=?]", ln)) > 3 or len(re.findall(r"\d{4,}", ln)) > 0:
+            continue
+        lines.append(ln)
+    t = " ".join(lines)
+    t = re.sub(r"\s+", " ", t).strip()
+    if len(t) > 300:
+        t = t[:300].rstrip() + " …"
+    return t
+
+def _followups_for_intent(intent: str) -> List[str]:
+    if intent == "returns":
+        return [
+            "Return window and eligibility?",
+            "Refund processing steps?",
+            "Can I exchange instead of return?",
+        ]
+    if intent == "warranty":
+        return [
+            "What is covered vs excluded?",
+            "Warranty claim process?",
+            "Warranty duration and proof needed?",
+        ]
+    if intent == "shipping":
+        return [
+            "Domestic vs international shipping times?",
+            "Shipping charges and carriers?",
+            "How do I track my order?",
+        ]
+    if intent == "policy":
+        return [
+            "Key points from privacy policy?",
+            "Important terms customers should know?",
+            "How to request data deletion?",
+        ]
+    if intent == "contact":
+        return [
+            "Support email and phone?",
+            "Business hours?",
+            "Escalation process?",
+        ]
+    return [
+        "Show related FAQs?",
+        "Where can I learn more?",
+        "Talk to support?",
+    ]
+
+
+def answer_query(query: str, top_k: int = 6, previous_answer: str = "") -> tuple[str, List[Citation]]:
+    # Detect user intent for conversational follow-ups
+    intent = _detect_intent(query)
+
+    # Retrieval with simple, intent-based augmentation (language-agnostic keywords)
+    aug = ""
+    if intent == "returns":
+        aug = " return returns refund cancellation policy"
+    elif intent == "warranty":
+        aug = " warranty 6-month 6 month policy"
+    elif intent == "shipping":
+        aug = " shipping delivery timeline policy"
+    elif intent == "policy":
+        aug = " policy terms conditions"
+    elif intent == "contact":
+        aug = " contact support phone email"
+    aug_query = (query + aug).strip()
+
     # Retrieve
-    items = retrieve(query, top_k=top_k)
+    items = retrieve(aug_query, top_k=top_k)
     if not items:
+        # Best-effort: no retrieval, return empty with hint handled by caller
         return "Not found in sources provided.", []
 
     # Build citations list in the same order as chunks appear in prompt
@@ -129,9 +341,71 @@ def answer_query(query: str, top_k: int = 6) -> tuple[str, List[Citation]]:
         citations.append(Citation(url=it.source, start_line=it.start_line, end_line=it.end_line))
 
     # Compose and call LLM
-    prompt = _compose_prompt(query, items)
+    prompt = _compose_prompt(query, items, intent=intent, previous_answer=previous_answer)
     txt = _call_openai(prompt)
-    return txt, citations
+
+    # Apply best-effort fallback if enabled and the model could not find an answer
+    fallback_on = os.getenv("ANSWER_FALLBACK_ENABLE", "1") in {"1", "true", "TRUE", "yes"}
+    followups_on = os.getenv("ANSWER_FOLLOWUPS_ENABLE", "1") in {"1", "true", "TRUE", "yes"}
+
+    def _build_fallback_text() -> str:
+        blocks: List[str] = []
+        blocks.append("I couldn’t find an exact answer in the provided sources. Here’s the closest relevant info:")
+        for ch in items[:2]:
+            snippet = _clean_snippet(ch.text)
+            if snippet:
+                blocks.append(snippet)
+        return " " .join(blocks)
+
+    out_text = txt
+    if fallback_on and out_text.strip().lower().startswith("not found in sources provided"):
+        out_text = _build_fallback_text()
+
+    # Append a single, mode-aware follow-up line using lexicon snippet
+    if followups_on:
+        lower = out_text.lower()
+        if "follow-ups:" not in lower and "follow ups:" not in lower:
+            # Try to load lexicon snippet for offer_details
+            lex_path = os.getenv(
+                "PERSONA_LEXICON_PATH",
+                str(
+                    ROOT
+                    / ".."
+                    / "Grest_RACEN_Slack_Bot"
+                    / "slack-openai-bot"
+                    / "Persona"
+                    / "lexicon.v1.yaml"
+                ),
+            )
+            lexicon = _read_lexicon(lex_path) if lex_path else {}
+            mode = _detect_mode(query)
+            offer = None
+            if lexicon:
+                modes = lexicon.get("modes") or {}
+                cfg = modes.get(mode) or {}
+                snips = cfg.get("snippets") or {}
+                offer = snips.get("offer_details")
+            if offer:
+                out_text = f"{out_text}\n\n{offer}"
+
+    # Reply shaper using lexicon (first paragraph only)
+    lex_path = os.getenv(
+        "PERSONA_LEXICON_PATH",
+        str(
+            ROOT
+            / ".."
+            / "Grest_RACEN_Slack_Bot"
+            / "slack-openai-bot"
+            / "Persona"
+            / "lexicon.v1.yaml"
+        ),
+    )
+    lexicon = _read_lexicon(lex_path) if lex_path else {}
+    if lexicon:
+        mode = _detect_mode(query)
+        out_text = _shape_first_paragraph(out_text, mode, lexicon)
+
+    return out_text, citations
 
 
 def main() -> None:
