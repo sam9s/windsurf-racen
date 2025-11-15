@@ -419,6 +419,35 @@ def _call_openai(prompt: str, max_retries: int = 3, model: str = "gpt-4o-mini") 
     return "Not found in sources provided."
 
 
+def _rewrite_language(text: str, target_mode: str) -> str:
+    """Rewrite assistant text to the target language mode (EN or HI_EN).
+
+    Args:
+        text: The original assistant output.
+        target_mode: "EN" or "HI_EN".
+
+    Returns:
+        Rewritten text on success; original text on failure.
+    """
+    try:
+        if not text.strip():
+            return text
+        if target_mode == "HI_EN":
+            instr = (
+                "Rewrite the reply strictly in Hinglish (mix Hindi + English naturally). "
+                "Keep meaning intact, do not add new content, and keep it concise."
+            )
+        else:
+            instr = (
+                "Rewrite the reply strictly in clear, simple English. "
+                "Keep meaning intact, do not add new content, and keep it concise."
+            )
+        prompt = f"{instr}\n\nOriginal:\n{text}\n\nRewrite:"
+        return _call_openai(prompt)
+    except Exception:
+        return text
+
+
 def _detect_intent(query: str) -> str:
     q = (query or "").lower()
     if any(k in q for k in ["return", "refund", "cancel", "exchange"]):
@@ -733,6 +762,15 @@ def answer_query(
         mode = _detect_mode(query)
         out_text = _shape_first_paragraph(out_text, mode, lexicon)
 
+    # Language force-rewrite guard (optional)
+    lang_lock_on = os.getenv("ANSWER_LANGUAGE_LOCK", "0") in {"1", "true", "TRUE", "yes"}
+    lang_force_on = os.getenv("ANSWER_LANGUAGE_FORCE_REWRITE", "0") in {"1", "true", "TRUE", "yes"}
+    target_mode = _detect_mode(previous_user or query)
+    current_mode = _detect_mode(out_text)
+    if lang_lock_on and lang_force_on and current_mode != target_mode:
+        out_text = _rewrite_language(out_text, target_mode)
+        current_mode = _detect_mode(out_text)
+
     # Snapshot debug info for ribbon when enabled
     try:
         top_score = items[0].score if items else 0.0
@@ -741,7 +779,7 @@ def answer_query(
     fallback_used = out_text.startswith("Exact info nahi mila") or out_text.startswith("I couldn’t find the exact info")
     global _LAST_DEBUG
     _LAST_DEBUG = (
-        f"intent={intent} | last_intent={last_intent} | eff_intent={effective_intent} | ack={int(ack)} | more_details={int(more_details)} | top_score={top_score:.2f} | fallback={int(fallback_used)}"
+        f"intent={intent} | last_intent={last_intent} | eff_intent={effective_intent} | ack={int(ack)} | more_details={int(more_details)} | top_score={top_score:.2f} | fallback={int(fallback_used)} | lang_target={target_mode} | lang_out={current_mode}"
     )
 
     return out_text, citations
