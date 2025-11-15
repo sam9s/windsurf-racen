@@ -34,7 +34,16 @@ def _read_lexicon(path_str: str) -> dict:
 def _detect_mode(text: str) -> str:
     t = (text or "").lower()
     # naive signals for Hinglish
-    hinges = ["hai", "hain", "hoon", "sakti", "sakun", "karo", "kariye", "aap", "ji", "nahi", "haa"]
+    hinges = [
+        # core verbs / pronouns
+        "hai", "hain", "hun", "hoon", "mein", "mai", "main", "aap", "ji", "nahi", "haa",
+        # ask/intent words
+        "kaise", "kese", "kya", "kyu", "kyun", "chahiye", "batao",
+        # action variants (spellings)
+        "kar", "karo", "kariye", "ker", "kr", "krna", "karna",
+        # ability/tense variants
+        "sakta", "sakte", "sakti", "sakun", "raha", "rha",
+    ]
     if any(w in t for w in hinges):
         return "HI_EN"
     return "EN"
@@ -263,6 +272,7 @@ def _compose_prompt(
     lines.append("You are a support assistant for GREST. Answer ONLY using the provided context.")
     lines.append("If the answer is not present in the context, reply: 'Not found in sources provided.'")
     match_lang = os.getenv("ANSWER_MATCH_INPUT_LANGUAGE", "0") in {"1", "true", "TRUE", "yes"}
+    lang_lock_on = os.getenv("ANSWER_LANGUAGE_LOCK", "0") in {"1", "true", "TRUE", "yes"}
     if match_lang:
         lines.append(
             "Mirror the user's language and style closely. Prefer the user's language; avoid mixing languages unless the user mixes them."
@@ -275,6 +285,13 @@ def _compose_prompt(
             lines.append(
                 "Do not switch languages unless the user's most recent message switched languages."
             )
+    # Strong lock: when enabled, strictly pin output language to the last user message
+    if lang_lock_on:
+        _mode_for_lock = _detect_mode(previous_user or query)
+        if _mode_for_lock == "HI_EN":
+            lines.append("IMPORTANT: Answer strictly in Hinglish (Hindi + English). Do not switch languages.")
+        else:
+            lines.append("IMPORTANT: Answer strictly in English. Do not switch languages.")
     else:
         lines.append("Use a female first-person voice (e.g., 'main madad kar sakti hoon').")
     # Avoid trailing full-English sentences in Hinglish replies
@@ -562,6 +579,9 @@ def answer_query(
         if effective_intent == "returns":
             # Temporarily bias retrieval to include the canonical cancellation route
             _ensure_in_allowlist("/pages/returns-refund-cancellation")
+        elif effective_intent == "shipping":
+            # Bias retrieval to include the canonical shipping policy page
+            _ensure_in_allowlist("/policies/shipping/policy")
         # If user acknowledged and previous answer offered sharing support details, include contact page
         if ack and prev_offered:
             _ensure_in_allowlist("/pages/contact-us")
