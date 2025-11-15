@@ -32,7 +32,7 @@ except Exception:
     pass
 
 from racen.step3_retrieve import effective_settings  # noqa: E402
-from scripts.step4_answer import answer_query  # noqa: E402
+from scripts.step4_answer import answer_query, get_last_debug_summary  # noqa: E402
 
 
 class AnswerRequest(BaseModel):
@@ -45,6 +45,7 @@ class AnswerRequest(BaseModel):
         k (Optional[int]): Top-k chunks to retrieve. Defaults to 10 if unset.
         short (Optional[bool]): If true, shorter answers and smaller chunks are used.
         previous_answer (Optional[str]): The last assistant reply in this thread, if any, to help the LLM interpret acknowledgements.
+        previous_user (Optional[str]): The last user message to preserve language continuity and resolve acknowledgements.
     """
 
     question: str = Field(..., min_length=1)
@@ -52,6 +53,7 @@ class AnswerRequest(BaseModel):
     k: Optional[int] = Field(default=None, ge=1, le=50)
     short: Optional[bool] = Field(default=None)
     previous_answer: Optional[str] = Field(default=None)
+    previous_user: Optional[str] = Field(default=None)
 
 
 class CitationOut(BaseModel):
@@ -120,7 +122,12 @@ def answer(req: AnswerRequest) -> AnswerResponse:
 
     k = req.k if req.k is not None else int(os.getenv("TOP_K", "10"))
 
-    text, cits = answer_query(req.question, top_k=k, previous_answer=(req.previous_answer or ""))
+    text, cits = answer_query(
+        req.question,
+        top_k=k,
+        previous_answer=(req.previous_answer or ""),
+        previous_user=(req.previous_user or ""),
+    )
 
     eff = effective_settings()
     ribbon = (
@@ -128,6 +135,13 @@ def answer(req: AnswerRequest) -> AnswerResponse:
         f"| allowlist={eff.get('RETRIEVE_SOURCE_ALLOWLIST')} | model={os.getenv('OPENAI_MODEL', 'gpt-4o-mini')}"
         f" | short={os.getenv('ANSWER_SHORT', '')}"
     )
+    if os.getenv("ANSWER_DEBUG_FLAGS", "0") in {"1", "true", "TRUE", "yes"}:
+        try:
+            dbg = get_last_debug_summary()
+            if dbg:
+                ribbon = ribbon + f" | {dbg}"
+        except Exception:
+            pass
 
     payload = AnswerResponse(
         answer=text,

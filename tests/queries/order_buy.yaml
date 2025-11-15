@@ -1,0 +1,12 @@
+# Basic order/buy queries for regression
+- q: "ok mein phone order kaise karun?"
+  expect_any:
+    - checkout
+    - cart
+    - buy
+    - https://grest.in/
+- q: "iphone kharidna kaise hai?"
+  expect_any:
+    - checkout
+    - buy
+    - cart

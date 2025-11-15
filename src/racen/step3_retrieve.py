@@ -156,6 +156,8 @@ def _source_bias(source: str) -> float:
         return 0.30
     if "/pages/faqs" in s:
         return 0.25
+    if "/pages/returns-refund-cancellation" in s:
+        return 0.28
     if "/policies/" in s:
         return 0.20
     return 0.0
