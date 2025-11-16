@@ -11,8 +11,8 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 
-from fastapi import FastAPI
-from pydantic import BaseModel, Field
+from fastapi import FastAPI, BackgroundTasks, HTTPException
+from pydantic import BaseModel, Field, HttpUrl, ValidationError
 
 # Ensure local 'src' is importable
 ROOT = Path(__file__).resolve().parents[1]
@@ -33,6 +33,9 @@ except Exception:
 
 from racen.step3_retrieve import effective_settings  # noqa: E402
 from scripts.step4_answer import answer_query, get_last_debug_summary  # noqa: E402
+from racen.orchestrator import ingest_url as orchestrator_ingest_url  # noqa: E402
+import uuid  # noqa: E402
+from datetime import datetime  # noqa: E402
 
 
 class AnswerRequest(BaseModel):
@@ -87,6 +90,67 @@ class AnswerResponse(BaseModel):
 
 
 app = FastAPI(title="RACEN Answer API", version="1.0.0")
+
+
+# Simple in-memory job store for ingestion status (sufficient for local/dev and Slack polling)
+JOBS: dict[str, dict] = {}
+
+
+class IngestRequest(BaseModel):
+    url: HttpUrl
+    requested_by: str = Field(..., min_length=1)
+
+
+class IngestResponse(BaseModel):
+    job_id: str
+
+
+class IngestStatus(BaseModel):
+    job_id: str
+    status: str
+    stage: str | None = None
+    detail: str | None = None
+    chunks_inserted: int | None = None
+    embeddings_inserted: int | None = None
+    updated_at: float
+
+
+def _validate_domain(url: str) -> None:
+    try:
+        from urllib.parse import urlparse
+        o = urlparse(url)
+        host = (o.hostname or "").lower()
+        if not host.endswith("grest.in"):
+            raise ValueError("Only grest.in URLs are allowed")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+def _set_job(job_id: str, **kwargs) -> None:
+    now = datetime.utcnow().timestamp()
+    state = JOBS.get(job_id, {})
+    state.update(kwargs)
+    state["updated_at"] = now
+    JOBS[job_id] = state
+
+
+def _run_ingest_job(job_id: str, url: str) -> None:
+    # Mark started
+    _set_job(job_id, status="started", stage="started", detail="Ingestion started")
+    try:
+        # Coarse stage: embeddings (covers crawl->parse->embed in orchestrator)
+        _set_job(job_id, stage="embedding", detail="Requesting embeddings")
+        res = orchestrator_ingest_url(url, embedding_dim=1536)
+        _set_job(
+            job_id,
+            status="done",
+            stage="done",
+            detail=f"Ingested {url}",
+            chunks_inserted=getattr(res, "chunks_inserted", None),
+            embeddings_inserted=getattr(res, "embeddings_inserted", None),
+        )
+    except Exception as e:
+        _set_job(job_id, status="error", stage="error", detail=f"{type(e).__name__}: {e}")
 
 
 @app.get("/health")
@@ -149,6 +213,36 @@ def answer(req: AnswerRequest) -> AnswerResponse:
         settings_summary=ribbon,
     )
     return payload
+
+
+@app.post("/ingest/url", response_model=IngestResponse)
+def ingest_url_api(req: IngestRequest, background: BackgroundTasks) -> IngestResponse:
+    """
+    Enqueue a background ingestion job for a single URL.
+
+    Only grest.in domain is allowed. Returns a job_id that can be polled via /ingest/status/{job_id}.
+    """
+    _validate_domain(str(req.url))
+    job_id = str(uuid.uuid4())
+    _set_job(job_id, status="accepted", stage="queued", detail=f"Accepted {req.url}")
+    background.add_task(_run_ingest_job, job_id, str(req.url))
+    return IngestResponse(job_id=job_id)
+
+
+@app.get("/ingest/status/{job_id}", response_model=IngestStatus)
+def ingest_status_api(job_id: str) -> IngestStatus:
+    st = JOBS.get(job_id)
+    if not st:
+        raise HTTPException(status_code=404, detail="job_id not found")
+    return IngestStatus(
+        job_id=job_id,
+        status=st.get("status", "unknown"),
+        stage=st.get("stage"),
+        detail=st.get("detail"),
+        chunks_inserted=st.get("chunks_inserted"),
+        embeddings_inserted=st.get("embeddings_inserted"),
+        updated_at=st.get("updated_at", 0.0),
+    )
 
 
 if __name__ == "__main__":
