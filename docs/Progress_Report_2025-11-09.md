@@ -79,6 +79,16 @@ DONE/Complete
   - Tone unit tests runner added: scripts/persona_test.py (PERSONA_TONE_TESTS_PATH).
   - Slack npm script: `yarn persona:test`.
 
+DONE/Complete
+- Escalation UX refined: on 3rd repeated fallback, replace fallback body with a concise support block (Phone, Email, Contact link), shown before the ribbon.
+- Recent-thread reuse added (per user+channel, 10 minutes) so fallback counts and `previous_answer` persist even if not explicitly replying in thread.
+- Fallback detection hardened in Slack bot (uses ribbon + safe answer-prefix check).
+- Retrieval confidence surfaced in ribbon via `top_score`/confidence for audit.
+
+Partially Done
+- Facet-like options appear in shipping fallback; consistent facet bundles across major intents (Shipping/Returns/Warranty) still to finalize.
+- Citation dedup not yet applied (confidence surfaced; dedup pending).
+
 ## Plan for next 5 steps
 1) Answer behavior (best‑effort + follow‑ups)
    - Best‑effort fallback: if no exact fact is present, reply “I couldn’t find an exact answer; here’s the closest info…” with citations. No fabrication.
@@ -152,3 +162,6 @@ Pending
 - Optionally ingest Trustpilot page(s) for reputation queries (clearly labeled as External).
 - Plan product pages ingestion and Slack-friendly rendering; outline Web UI for richer cards/images.
 - Design intent‑driven Internet search with guardrails and integrate the researcher subagent if chosen.
+ - Define and surface facet bundles for Shipping/Returns/Warranty (2–3 compact options on low-confidence and fallback turns).
+ - Apply citation deduplication (collapse duplicate/near-duplicate sources); confidence remains in ribbon.
+ - Add live-agent handoff stub (config + API shape) and wire escalation to call it behind a flag.

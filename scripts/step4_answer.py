@@ -379,6 +379,10 @@ def _compose_prompt(
         lines.append("- Provide a concise answer (3-6 sentences).")
         lines.append("- Do not add inline [n] markers or a 'Citations' section; the caller will attach citations separately.")
     lines.append("- Do NOT use any external knowledge beyond the provided context.")
+    # Product intent: shape answer towards product summary with key specs and link (all grounded)
+    if (intent or "").lower() == "product":
+        lines.append("- If the question is about a product, provide a brief summary first, then 3-6 short bullets for key specs (e.g., storage, color, condition, warranty, battery health) when present in context.")
+        lines.append("- Include the product page link once (choose the clearest matching 'Source:' URL from the provided context headers).")
     return "\n".join(lines)
 
 
@@ -473,6 +477,11 @@ def _detect_intent(query: str) -> str:
     ]
     if "contact" in q or "support" in q or "help" in q or any(s in q for s in address_signals):
         return "contact"
+    # Product-style queries (generic, no hardcoded product names):
+    # If users ask for details/specs/price and it's not any of the above intents, treat as product info intent.
+    product_cues = ["spec", "specs", "specifications", "details", "price", "prices", "features"]
+    if any(c in q for c in product_cues):
+        return "product"
     # order/buy intent (broad coverage for EN + Hinglish)
     buy_signals = [
         "order", "buy", "purchase", "checkout", "cart", "place order",
@@ -596,6 +605,9 @@ def answer_query(
         aug = " contact support phone email"
     elif intent == "order_buy":
         aug = " order buy purchase checkout cart payment how to buy place order"
+    elif intent == "product":
+        # Generic product cues without hardcoding specific product names
+        aug = " product details specs specifications features price"
     aug_query = (query + aug).strip()
 
     # Retrieve (with optional per-intent allowlist boost and facet expansion)
@@ -637,6 +649,9 @@ def answer_query(
         elif effective_intent == "shipping":
             # Bias retrieval to include the canonical shipping policy page
             _ensure_in_allowlist("/policies/shipping/policy")
+        elif effective_intent == "product":
+            # Bias retrieval toward product pages without hardcoding any product names
+            _ensure_in_allowlist("/products/")
         # If user acknowledged and previous answer offered sharing support details, include contact page
         if ack and prev_offered:
             _ensure_in_allowlist("/pages/contact-us")
