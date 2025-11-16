@@ -454,7 +454,16 @@ def _detect_intent(query: str) -> str:
         return "returns"
     if "warranty" in q or "guarantee" in q:
         return "warranty"
-    if "ship" in q or "delivery" in q or "international" in q:
+    # Shipping / delivery detection (avoid location hardcoding; rely on generic phrasing)
+    if any(k in q for k in [
+        "ship",
+        "shipping",
+        "ship to",
+        "deliver",
+        "deliver to",
+        "delivery",
+        "international"
+    ]):
         return "shipping"
     if "privacy" in q or "data" in q or "terms" in q:
         return "policy"
@@ -472,6 +481,23 @@ def _detect_intent(query: str) -> str:
     if any(sig in q for sig in buy_signals):
         return "order_buy"
     return "general"
+
+
+def _detect_tone(text: str) -> str:
+    t = (text or "").lower().strip()
+    if not t:
+        return "neutral"
+    upset_signals = [
+        "late", "delay", "delayed", "not delivered", "still not", "why", "angry", "frustrated",
+        "complaint", "issue", "problem", "worst", "bad service", "refund now", "escalate"
+    ]
+    if any(sig in t for sig in upset_signals):
+        return "upset"
+    exclaim = t.count("!") >= 2
+    allcaps = any(len(w) >= 3 and w.isupper() for w in t.split())
+    if exclaim or allcaps:
+        return "upset"
+    return "neutral"
 
 
 def _clean_snippet(text: str) -> str:
@@ -641,41 +667,89 @@ def answer_query(
     # Apply best-effort fallback if enabled and the model could not find an answer
     fallback_on = os.getenv("ANSWER_FALLBACK_ENABLE", "1") in {"1", "true", "TRUE", "yes"}
     followups_on = os.getenv("ANSWER_FOLLOWUPS_ENABLE", "1") in {"1", "true", "TRUE", "yes"}
+    tone_on = os.getenv("ANSWER_TONE_AWARE", "0") in {"1", "true", "TRUE", "yes"}
+    tone = _detect_tone(previous_user or query) if tone_on else "neutral"
 
     def _build_fallback_text() -> str:
         mode = _detect_mode(query)
-        intro = (
-            "Exact info nahi mila, par yeh closest details hain:" if mode == "HI_EN" else
-            "I couldn’t find the exact info, here’s the closest helpful detail:"
-        )
-        pieces: List[str] = [intro]
-        for ch in items[:2]:
-            snippet = _clean_snippet(ch.text)
-            if snippet:
-                pieces.append(snippet)
-        # Suggest 2 concrete next options from facet/intent
+        graceful = os.getenv("ANSWER_FALLBACK_GRACEFUL", "0") in {"1", "true", "TRUE", "yes"}
+        use_emoji = False
+        try:
+            elv = int(os.getenv("PERSONA_EMOJI_LEVEL", "0"))
+        except Exception:
+            elv = 0
+        if tone != "upset" and elv > 0:
+            use_emoji = True
+        emoji = " 🙂" if use_emoji else ""
         opts_map = {
-            "contact": ["Phone number", "Email", "Contact link"],
+            "contact": ["Phone number", "Email"],
             "returns": ["Cancel steps", "Refund timeline"],
             "warranty": ["Coverage", "Claim process"],
-            "shipping": ["Delivery timelines", "Charges"],
+            # Offer Charges first for shipping queries to feel more relevant
+            "shipping": ["Charges", "Delivery timelines"],
             "order_buy": ["Payment options", "How to order"],
-            "general": ["Policy link", "Details"]
+            "general": ["Policy link", "Details"],
         }
         opts = opts_map.get(intent) or opts_map["general"]
-        if mode == "HI_EN":
-            ask = f"Kya main {opts[0]} ya {opts[1]} share karun? Ya aap bata dein kis cheez ki details chahiye, main help kar dungi."
+        if graceful:
+            if mode == "HI_EN":
+                head = "Exact line nahi mila, par yeh closest info hai." + emoji
+                ask = (
+                    f"Aap chaho to main {opts[0]} ya {opts[1]} share kar sakti hoon.\n"
+                    "Jo exact detail chahiye batao, main turant nikaal dungi."
+                )
+            else:
+                head = (
+                    "I couldn’t find an exact line on that yet, but here’s the closest helpful info I do have." 
+                    + emoji
+                )
+                ask = (
+                    f"If you want, I can share {opts[0]} or {opts[1]}.\n"
+                    "Tell me the exact detail you need and I’ll fetch it."
+                )
+            pieces: List[str] = [head]
+            for ch in items[:2]:
+                sn = _clean_snippet(ch.text)
+                if sn:
+                    pieces.append(sn)
+            # Keep ask as a separate line for Slack readability
+            pieces.append(ask)
+            return "\n\n".join(pieces)
         else:
-            ask = f"Want me to share {opts[0]} or {opts[1]}? Or tell me what you need and I’ll help."
-        pieces.append(ask)
-        return " ".join(pieces)
+            intro = (
+                "Exact info nahi mila, par yeh closest details hain:" if mode == "HI_EN" else
+                "I couldn’t find the exact info, here’s the closest helpful detail:"
+            )
+            pieces2: List[str] = [intro]
+            for ch in items[:2]:
+                snippet = _clean_snippet(ch.text)
+                if snippet:
+                    pieces2.append(snippet)
+            if mode == "HI_EN":
+                ask2 = f"Kya main {opts[0]} ya {opts[1]} share karun? Ya aap bata dein kis cheez ki details chahiye, main help kar dungi."
+            else:
+                ask2 = f"Want me to share {opts[0]} or {opts[1]}? Or tell me what you need and I’ll help."
+            pieces2.append(ask2)
+            return "\n\n".join(pieces2)
 
     out_text = _strip_inline_citations(txt)
-    if fallback_on and out_text.strip().lower().startswith("not found in sources provided"):
+    low = out_text.strip().lower()
+    if fallback_on and (low.startswith("not found in sources provided")):
         out_text = _build_fallback_text()
+    # If user explicitly asked for shipping charges but none of the retrieved texts contain charge-like tokens,
+    # use the graceful fallback even if the model produced a generic shipping answer.
+    if fallback_on and effective_intent == "shipping":
+        q_has_charges = any(tok in ql for tok in ["charge", "charges", "fee", "fees", "cost", "costs", "pricing", "price"])
+        if q_has_charges:
+            ctx_join = " ".join((it.text or "") for it in items[:6]).lower()
+            ctx_has_charges = any(tok in ctx_join for tok in ["charge", "charges", "fee", "fees", "cost", "costs", "₹", "rs ", "rs."])
+            if not ctx_has_charges:
+                out_text = _build_fallback_text()
 
     # Deterministic contact drill-down: if user asked to continue/more details for contact/address
-    if effective_intent == "contact" and (ack or more_details):
+    # Observe-only guard: when ANSWER_ACK_OBSERVE_ONLY is enabled, do not change behavior
+    ack_observe_only = os.getenv("ANSWER_ACK_OBSERVE_ONLY", "1") in {"1", "true", "TRUE", "yes"}
+    if (not ack_observe_only) and effective_intent == "contact" and (ack or more_details):
         # Prefer authoritative env facts when available
         support_phone = (os.getenv("SUPPORT_PHONE", "") or "").strip()
         support_email = (os.getenv("SUPPORT_EMAIL", "") or "").strip()
@@ -729,6 +803,8 @@ def answer_query(
                     emoji_level = int(os.getenv("PERSONA_EMOJI_LEVEL", "0"))
                 except Exception:
                     emoji_level = 0
+                if tone == "upset":
+                    emoji_level = 0
                 suffix = ""
                 if emoji_level > 0 and not any(e in offer for e in ["🙂", "✅", "😊", "😉"]):
                     suffix = " 🙂"
@@ -762,6 +838,29 @@ def answer_query(
         mode = _detect_mode(query)
         out_text = _shape_first_paragraph(out_text, mode, lexicon)
 
+    # Optional warm suffix for neutral tone (no facts changed)
+    try:
+        emoji_level2 = int(os.getenv("PERSONA_EMOJI_LEVEL", "0"))
+    except Exception:
+        emoji_level2 = 0
+    warmth_on = os.getenv("ANSWER_PERSONA_WARMTH", "0") in {"1", "true", "TRUE", "yes"}
+    if warmth_on and tone != "upset" and emoji_level2 > 0:
+        mode = _detect_mode(previous_user or query)
+        parts_ws = out_text.split("\n\n", 1)
+        first_ws = parts_ws[0]
+        rest_ws = parts_ws[1] if len(parts_ws) > 1 else ""
+        has_emoji = any(e in first_ws for e in ["🙂", "✅", "😊", "😉"])
+        is_greeting = (previous_user or "").strip().lower() in {"hi", "hello", "hey", "hii", "hye"}
+        already_warm = any(s in first_ws.lower() for s in ["happy to help", "help kar dungi", "glad to help"]) 
+        # Add warmth only for greetings, avoid repetition
+        if not has_emoji and not already_warm and is_greeting:
+            if mode == "HI_EN":
+                warm = "  Batao, main help kar dungi 🙂"
+            else:
+                warm = "  Happy to help 🙂"
+            first_ws = first_ws + warm
+            out_text = first_ws if not rest_ws else f"{first_ws}\n\n{rest_ws}"
+
     # Language force-rewrite guard (optional)
     lang_lock_on = os.getenv("ANSWER_LANGUAGE_LOCK", "0") in {"1", "true", "TRUE", "yes"}
     lang_force_on = os.getenv("ANSWER_LANGUAGE_FORCE_REWRITE", "0") in {"1", "true", "TRUE", "yes"}
@@ -776,10 +875,46 @@ def answer_query(
         top_score = items[0].score if items else 0.0
     except Exception:
         top_score = 0.0
-    fallback_used = out_text.startswith("Exact info nahi mila") or out_text.startswith("I couldn’t find the exact info")
+    def _is_fallback_text(s: str) -> bool:
+        t = (s or "").strip()
+        return (
+            t.startswith("Exact info nahi mila")
+            or t.startswith("I couldn’t find the exact info")
+            or t.startswith("I couldn’t find a direct line on that")
+        )
+
+    fallback_used = (
+        out_text.startswith("Exact info nahi mila") 
+        or out_text.startswith("I couldn’t find the exact info")
+        or out_text.startswith("I couldn’t find a direct line on that")
+    )
+
+    # Escalation: if previous answer was a fallback and current is also a fallback, offer human support
+    if fallback_on and fallback_used and _is_fallback_text(previous_answer):
+        support_phone = (os.getenv("SUPPORT_PHONE", "") or "").strip()
+        support_email = (os.getenv("SUPPORT_EMAIL", "") or "").strip()
+        contact_link = "https://grest.in/pages/contact-us"
+        mode_es = _detect_mode(previous_user or query)
+        emoji_es = " 🙂" if (tone != "upset" and int(os.getenv("PERSONA_EMOJI_LEVEL", "0") or 0) > 0) else ""
+        if mode_es == "HI_EN":
+            esc = [
+                "Agar aap chaho to main support se connect kara sakti hoon." + emoji_es,
+                f"Phone: {support_phone}" if support_phone else "",
+                f"Email: {support_email}" if support_email else "",
+                f"Link: {contact_link}",
+            ]
+        else:
+            esc = [
+                "If you want, I can connect you to our support team." + emoji_es,
+                f"Phone: {support_phone}" if support_phone else "",
+                f"Email: {support_email}" if support_email else "",
+                f"Contact link: {contact_link}",
+            ]
+        esc_text = "\n".join([line for line in esc if line])
+        out_text = f"{out_text}\n\n{esc_text}"
     global _LAST_DEBUG
     _LAST_DEBUG = (
-        f"intent={intent} | last_intent={last_intent} | eff_intent={effective_intent} | ack={int(ack)} | more_details={int(more_details)} | top_score={top_score:.2f} | fallback={int(fallback_used)} | lang_target={target_mode} | lang_out={current_mode}"
+        f"intent={intent} | last_intent={last_intent} | eff_intent={effective_intent} | ack={int(ack)} | more_details={int(more_details)} | top_score={top_score:.2f} | fallback={int(fallback_used)} | lang_target={target_mode} | lang_out={current_mode} | tone={tone}"
     )
 
     return out_text, citations
