@@ -20,6 +20,7 @@ class DummyChunk:
     [
         ("do you have macbook air?", "product"),
         ("kya iphone 13 hai?", "product"),
+        ("how about macbooks?", "product"),
         ("what is your shipping policy?", "shipping"),
         ("how do I get a refund?", "returns"),
     ],
@@ -98,3 +99,27 @@ def test_product_fallback_does_not_leak_noisy_catalog_snippets(monkeypatch: pyte
     assert "sour apple" not in low
     # And we should instead see a graceful clarification
     assert "exact match" in low or "exact model" in low
+
+
+def test_category_query_uses_product_family_from_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Category-style queries like 'macbooks' should be treated as product and bias retrieval to that family."""
+
+    captured = {"query": None}
+
+    def fake_retrieve(query: str, top_k: int = 6):  # type: ignore[override]
+        captured["query"] = query
+        return [DummyChunk(source="/products/test-macbook", text="Refurbished MacBook listing")]
+
+    # Ensure we don't hit the real LLM
+    def fake_call_openai(prompt: str, max_retries: int = 3, model: str = "gpt-4o-mini") -> str:  # type: ignore[override]
+        return "Test answer"
+
+    monkeypatch.setattr(sa, "retrieve", fake_retrieve)
+    monkeypatch.setattr(sa, "_call_openai", fake_call_openai)
+
+    ans, _ = sa.answer_query("how about macbooks?", top_k=3)
+    assert ans  # sanity
+    assert captured["query"] is not None
+    q = captured["query"].lower()
+    # The retrieval query should include a macbook-family keyword from config
+    assert "macbook" in q

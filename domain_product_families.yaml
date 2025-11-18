@@ -1,0 +1,21 @@
+families:
+  - name: iphone
+    keywords:
+      - iphone
+      - iphones
+  - name: macbook
+    keywords:
+      - macbook
+      - mac book
+      - macbooks
+      - mackbooks
+  - name: laptop
+    keywords:
+      - laptop
+      - laptops
+      - notebook
+      - notebooks
+  - name: ipad
+    keywords:
+      - ipad
+      - ipads

@@ -31,6 +31,36 @@ def _read_lexicon(path_str: str) -> dict:
         return {}
     return {}
 
+
+def _load_product_families() -> dict:
+    """Load product families from a YAML config for domain-specific nouns.
+
+    The file domain_product_families.yaml should define:
+    families:
+      - name: iphone
+        keywords: ["iphone", "iphones"]
+      - name: macbook
+        keywords: ["macbook", "mac book", "macbooks", "mackbooks"]
+    """
+    # Compute project root locally to avoid relying on module-level ROOT ordering
+    project_root = Path(__file__).resolve().parents[1]
+    cfg_path = project_root / "domain_product_families.yaml"
+    data = _read_lexicon(str(cfg_path)) if cfg_path.exists() else {}
+    fams = data.get("families") or []
+    out: dict[str, list[str]] = {}
+    for fam in fams:
+        try:
+            name = (fam.get("name") or "").strip().lower()
+            kws = [str(k).strip().lower() for k in (fam.get("keywords") or []) if str(k).strip()]
+            if name and kws:
+                out[name] = kws
+        except Exception:
+            continue
+    return out
+
+
+PRODUCT_FAMILIES = _load_product_families()
+
 def _detect_mode(text: str) -> str:
     t = (text or "").lower()
     # naive signals for Hinglish
@@ -480,9 +510,9 @@ def _detect_intent(query: str) -> str:
     ]
     if "contact" in q or "support" in q or "help" in q or any(s in q for s in address_signals):
         return "contact"
-    # Product-style queries (generic, no hardcoded product names beyond domain nouns):
-    # If users ask for details/specs/price OR mention device nouns and it's not any of the above intents,
-    # treat as product info intent. This keeps behavior dynamic while aligning with GREST domain.
+    # Product-style queries (generic, driven by config-based device families):
+    # If users ask for details/specs/price OR mention any configured family keyword,
+    # treat as product info intent.
     product_cues = [
         "spec",
         "specs",
@@ -491,15 +521,16 @@ def _detect_intent(query: str) -> str:
         "price",
         "prices",
         "features",
-        "macbook",
-        "mac book",
-        "laptop",
-        "notebook",
     ]
     if any(c in q for c in product_cues):
         return "product"
-    phone_nouns = ["iphone", "phone", "mobile", "ipad"]
-    if any(n in q for n in phone_nouns):
+    # Any product family keyword from config should map to product intent
+    for _, kws in PRODUCT_FAMILIES.items():
+        if any(k in q for k in kws):
+            return "product"
+    # Fallback: generic device nouns if config is missing or incomplete
+    device_nouns = ["macbook", "mac book", "iphone", "ipad", "laptop", "notebook", "phone", "mobile"]
+    if any(n in q for n in device_nouns):
         return "product"
     # order/buy intent (broad coverage for EN + Hinglish)
     buy_signals = [
@@ -666,19 +697,25 @@ def answer_query(
         effective_intent = last_intent
 
     # For product follow-ups, keep retrieval biased toward the same product family
-    # mentioned in the previous answer (e.g., macbook vs iphone) using generic
-    # domain nouns instead of hardcoded SKUs.
+    # mentioned in the previous answer using configured domain nouns instead of
+    # hardcoded SKUs.
     if effective_intent == "product" and (ack or more_details) and previous_answer:
-        prev_prod_nouns = [
-            "macbook",
-            "mac book",
-            "iphone",
-            "ipad",
-            "laptop",
-        ]
-        for noun in prev_prod_nouns:
-            if noun in prevl and noun not in aug_query.lower():
-                aug_query = f"{aug_query} {noun}".strip()
+        matched = False
+        for fam_name, kws in PRODUCT_FAMILIES.items():
+            for kw in kws:
+                if kw in prevl and kw not in aug_query.lower():
+                    aug_query = f"{aug_query} {kw}".strip()
+                    matched = True
+                    break
+            if matched:
+                break
+        # Fallback: if no config keyword matched, use generic device nouns
+        if not matched:
+            fallback_nouns = ["macbook", "mac book", "iphone", "ipad", "laptop", "notebook", "phone", "mobile"]
+            for noun in fallback_nouns:
+                if noun in prevl and noun not in aug_query.lower():
+                    aug_query = f"{aug_query} {noun}".strip()
+                    break
 
     # If user is acknowledging/asking for more details, decide facet by last intent
     facet_cfg = FACET_BUNDLES.get(effective_intent) or {}
