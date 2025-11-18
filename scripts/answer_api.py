@@ -222,6 +222,12 @@ def ingest_url_api(req: IngestRequest, background: BackgroundTasks) -> IngestRes
 
     Only grest.in domain is allowed. Returns a job_id that can be polled via /ingest/status/{job_id}.
     """
+    # Enforce optional ingest allowlist based on Slack user IDs
+    allow_raw = os.getenv("INGEST_ALLOWED_USERS", "")
+    allowlisted: set[str] = set(u.strip() for u in allow_raw.split(",") if u.strip())
+    if allowlisted and req.requested_by not in allowlisted:
+        raise HTTPException(status_code=403, detail="User not allowed to ingest.")
+
     _validate_domain(str(req.url))
     job_id = str(uuid.uuid4())
     _set_job(job_id, status="accepted", stage="queued", detail=f"Accepted {req.url}")

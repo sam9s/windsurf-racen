@@ -117,6 +117,9 @@ def _limit_first_bubble(text: str, max_sent: int = 2) -> str:
 
 def _infer_last_intent(prev_ans: str) -> str:
     p = (prev_ans or "").lower()
+    # Product-like answers: device families and product pages
+    if any(k in p for k in ["macbook", "mac book", "iphone", "ipad", "laptop", "product page"]):
+        return "product"
     if any(k in p for k in ["refund", "cancel", "return", "exchange"]):
         return "returns"
     if any(k in p for k in ["warranty", "guarantee"]):
@@ -478,12 +481,24 @@ def _detect_intent(query: str) -> str:
     if "contact" in q or "support" in q or "help" in q or any(s in q for s in address_signals):
         return "contact"
     # Product-style queries (generic, no hardcoded product names beyond domain nouns):
-    # If users ask for details/specs/price OR mention phone nouns and it's not any of the above intents,
-    # treat as product info intent. This keeps behavior dynamic across products while aligning with GREST domain.
-    product_cues = ["spec", "specs", "specifications", "details", "price", "prices", "features"]
+    # If users ask for details/specs/price OR mention device nouns and it's not any of the above intents,
+    # treat as product info intent. This keeps behavior dynamic while aligning with GREST domain.
+    product_cues = [
+        "spec",
+        "specs",
+        "specifications",
+        "details",
+        "price",
+        "prices",
+        "features",
+        "macbook",
+        "mac book",
+        "laptop",
+        "notebook",
+    ]
     if any(c in q for c in product_cues):
         return "product"
-    phone_nouns = ["iphone", "phone", "mobile"]
+    phone_nouns = ["iphone", "phone", "mobile", "ipad"]
     if any(n in q for n in phone_nouns):
         return "product"
     # order/buy intent (broad coverage for EN + Hinglish)
@@ -650,6 +665,21 @@ def answer_query(
     if ack and intent == "general" and last_intent != "general":
         effective_intent = last_intent
 
+    # For product follow-ups, keep retrieval biased toward the same product family
+    # mentioned in the previous answer (e.g., macbook vs iphone) using generic
+    # domain nouns instead of hardcoded SKUs.
+    if effective_intent == "product" and (ack or more_details) and previous_answer:
+        prev_prod_nouns = [
+            "macbook",
+            "mac book",
+            "iphone",
+            "ipad",
+            "laptop",
+        ]
+        for noun in prev_prod_nouns:
+            if noun in prevl and noun not in aug_query.lower():
+                aug_query = f"{aug_query} {noun}".strip()
+
     # If user is acknowledging/asking for more details, decide facet by last intent
     facet_cfg = FACET_BUNDLES.get(effective_intent) or {}
     if (ack or more_details) and facet_cfg:
@@ -724,6 +754,22 @@ def answer_query(
             "general": ["Policy link", "Details"],
         }
         opts = opts_map.get(intent) or opts_map["general"]
+        # For product queries, avoid leaking noisy catalog snippets (e.g. vitamins/quiz)
+        # and instead return a controlled, graceful clarification message.
+        if intent == "product":
+            if mode == "HI_EN":
+                head = "Mujhe is exact iPhone/MacBook model ka product page nahi mila." + emoji
+                ask = (
+                    "Kya aap exact model (jaise iPhone 11, iPhone 12, MacBook Air 2017) "
+                    "bata sakte ho, taaki main sahi details de sakun?"
+                )
+            else:
+                head = "I couldn’t find an exact match for that model in our catalog." + emoji
+                ask = (
+                    "Could you please rephrase or mention the exact model you’re looking for "
+                    "(for example, iPhone 11, iPhone 12, or a specific MacBook variant)?"
+                )
+            return f"{head}\n\n{ask}"
         if graceful:
             if mode == "HI_EN":
                 head = "Exact line nahi mila, par yeh closest info hai." + emoji
