@@ -477,10 +477,14 @@ def _detect_intent(query: str) -> str:
     ]
     if "contact" in q or "support" in q or "help" in q or any(s in q for s in address_signals):
         return "contact"
-    # Product-style queries (generic, no hardcoded product names):
-    # If users ask for details/specs/price and it's not any of the above intents, treat as product info intent.
+    # Product-style queries (generic, no hardcoded product names beyond domain nouns):
+    # If users ask for details/specs/price OR mention phone nouns and it's not any of the above intents,
+    # treat as product info intent. This keeps behavior dynamic across products while aligning with GREST domain.
     product_cues = ["spec", "specs", "specifications", "details", "price", "prices", "features"]
     if any(c in q for c in product_cues):
+        return "product"
+    phone_nouns = ["iphone", "phone", "mobile"]
+    if any(n in q for n in phone_nouns):
         return "product"
     # order/buy intent (broad coverage for EN + Hinglish)
     buy_signals = [
@@ -625,8 +629,22 @@ def answer_query(
     ack_label = _classify_ack(previous_answer, query) if previous_answer else "NEW_TOPIC"
     ack = ack_label == "ACK_CONTINUE"
     prev_offered = any(tok in prevl for tok in ["support", "phone", "email", "contact"])
-    # Detect generic "more details" request
+    # Detect generic "more details" request from the current turn
     more_details = any(tok in ql for tok in ["more details", "details", "zyada details", "details chahiye"]) and len(ql) <= 60
+    # If the previous answer explicitly offered more details and the user acknowledged (e.g., "yes please"),
+    # treat this as a dynamic request for more details on the same topic, without hardcoding product names.
+    if not more_details and ack:
+        more_detail_offer_signals = [
+            "would you like to see more details",
+            "would you like more details",
+            "want more details",
+            "would you like to know more",
+            "see more details",
+            "share more details",
+            "zyada details",
+        ]
+        if any(sig in prevl for sig in more_detail_offer_signals):
+            more_details = True
     # Effective intent for acknowledgements
     effective_intent = intent
     if ack and intent == "general" and last_intent != "general":
