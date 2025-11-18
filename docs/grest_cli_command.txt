@@ -1,0 +1,13 @@
+$body = @{
+  question = "do you have iPhone 11?"
+  k        = 18
+  short    = $true
+} | ConvertTo-Json
+
+Invoke-RestMethod `
+  -Uri "http://127.0.0.1:8011/answer" `
+  -Method POST `
+  -ContentType "application/json" `
+  -Body $body |
+  ConvertTo-Json -Depth 6
+

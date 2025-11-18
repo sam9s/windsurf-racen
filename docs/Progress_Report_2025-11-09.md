@@ -136,6 +136,9 @@ Partially Done
   - PERSONA_LEXICON_PATH
   - PERSONA_TONE_TESTS_PATH
 - Git policy: snapshot branches maintained; commit Answer API, scripts, tests, and README updates before feature jumps.
+- Canonical planning/tracking files:
+  - `docs/Progress_Report_2025-11-09.md` (this document) for phases, architecture and narrative status.
+  - `TASK.md` for a compact checklist of active/completed tasks (IDs aligned with code/tests).
 
 ## Ingestion Strategy
 - Targeted single-URL runs for clarity; verify chunks>0 after each.
@@ -165,3 +168,77 @@ Pending
  - Define and surface facet bundles for Shipping/Returns/Warranty (2–3 compact options on low-confidence and fallback turns).
  - Apply citation deduplication (collapse duplicate/near-duplicate sources); confidence remains in ribbon.
  - Add live-agent handoff stub (config + API shape) and wire escalation to call it behind a flag.
+
+## Update – 2025-11-18 (Slack Ingest + Product Q&A)
+
+### Completed Since Last Report
+- **Slack ingest allowlist and 403 handling**
+  - Backend: `scripts/answer_api.py` exposes `/ingest/url` with `INGEST_ALLOWED_USERS` env-driven allowlist.
+  - Slack bot: `slack-openai-bot/app.js` checks for HTTP 403 from backend; on 403, sends a direct "not authorized to ingest" DM and does not start status polling.
+  - Behavior verified with two Slack accounts (allowed vs non-allowed) and logs.
+
+- **Product Q&A robustness (MacBook / iPhone flows)**
+  - Product intent detection improved in `scripts/step4_answer.py` for device queries (MacBook/iPhone/laptop/iPad) including Hinglish variants.
+  - Follow-up logic now biases retrieval toward the same product family mentioned in the previous answer (e.g., MacBook vs iPhone) rather than drifting to unrelated products.
+  - Graceful product fallback implemented for non-existent models (e.g., iPhone 10):
+    - Returns a clean clarification asking for the exact model, without leaking noisy catalog text (vitamins/quiz etc.).
+    - Dedicated fallback path for `intent=product` avoids including low-signal snippets in the reply.
+
+- **Domain config and tests**
+  - New YAML config: `domain_product_families.yaml` with product families (iphone, macbook, laptop, ipad) and their keywords.
+  - `step4_answer.py` now loads `PRODUCT_FAMILIES` from YAML for:
+    - Product intent detection.
+    - Product follow-up bias toward the same family.
+  - Pytest suite added: `tests/test_step4_answer.py` covering:
+    - Intent detection for core queries (MacBook/iPhone/shipping/returns).
+    - Last-intent inference from previous answers.
+    - Product follow-up anchoring to the previous product family.
+    - Product fallback behavior (no noisy snippets; clean clarification).
+    - Early category-style handling for queries like "how about macbooks?" (retrieval query includes family keyword).
+
+### Phase Framing (Internal)
+- **Phase 1 (by 2025-11-30 – internal demo)**
+  - Goal: Solid, grounded catalog Q&A and ingest for internal Slack and a minimal Web UI.
+  - Scope (backend):
+    - Exact product queries for iPhones/MacBooks/laptops (availability, key specs, stock status).
+    - Graceful fallback for non-existent models (no hallucinated catalog items).
+    - Ingest allowlist and status polling in Slack.
+    - Hinglish mirroring and best-effort fallback retained from earlier work.
+  - Scope (frontend):
+    - Slack bot as primary interface.
+    - A small Web UI on the website that calls the same `/answer` API (single chat box, grounded answers, optional source links).
+
+- **Phase 2 (work-in-progress, not shown in first demo)**
+  - ACK refinement: treat "ok how about X" with a different product family as a new topic instead of a pure acknowledgement.
+  - Category/browse behavior for product families:
+    - Queries like "any macbooks you have?", "iphones?" list a small set of products and ask the user which one they want details on.
+  - "Latest model you have" within catalog (rank among ingested products rather than global web knowledge).
+  - Intent-driven external comparison (later): use the n8n + Brave web researcher agent for cross-model comparisons (e.g., iPhone 13 vs iPhone 14) under strict guardrails and clear External labeling.
+
+- **Phase 1.5 – MVP refinement in current repo (in progress)**
+  - Tighten product behavior without breaking the existing API:
+    - Robust product intent detection (e.g., "do you have X", Android/Apple phones, headphones/accessories).
+    - Qualifier-aware answers: respect words like "retina", year, size, storage/RAM; when no exact variant exists, say so clearly and suggest alternatives.
+    - Define an "iPhone-only" test surface: ingest all iPhone product URLs from grest.in (via YAML allowlist + Slack ingest) and validate product behavior and fallbacks primarily on this family before expanding.
+  - Introduce an `intent_classifier` abstraction inside Python while keeping external behavior stable:
+    - Wrap existing `_detect_intent` / `_infer_last_intent` logic behind a small classifier interface.
+    - Add tests around common flows (product/returns/shipping/contact/general/unclear).
+  - Add explicit "unclear intent" fallback:
+    - For noisy or ambiguous queries, return a short, honest rephrase request instead of random policy snippets.
+  - Round out category/browse flows for current families (MacBook/iPhone/iPad/laptop) using the YAML config.
+
+- **Phase 3 – MNC-grade evolution roadmap (design + later implementation)**
+  - Product- and DB-aware retrieval:
+    - Define a `product_search` abstraction that can evolve from pure RAG over `/products/*` to DB+RAG (using structured attributes like brand, family, model, RAM/storage, platform).
+    - Keep this behind a stable function boundary so the Slack bot and `/answer` API do not change.
+  - Stronger intent classification:
+    - Evolve from heuristics to a dedicated intent classifier (LLM-based first; fine-tuned later when enough data is available).
+    - Support future categories (Android phones, headphones/accessories, etc.) without per-product code changes.
+  - Multi-category and multi-brand support:
+    - Ensure the design can handle arbitrary new product lines (e.g., mid-range Android, accessories) by relying on DB schema and generic qualifiers, not hardcoded names.
+  - Multi-format ingestion:
+    - Extend the ingestion pipeline to support non-HTML sources (PDF, Word, TXT) by adding a loader layer that normalizes each format to markdown before chunking/embedding, so RACEN can answer from richer GREST docs beyond web pages.
+  - Guardrails and UX:
+    - Preserve the current tested behaviors (no hallucinated catalog items, clear fallbacks, citations) while gradually adding structure.
+
+These phase definitions keep the current Slack + Answer API MVP on track while explicitly documenting how we will evolve toward a more DB-aware, classifier-driven, multi-category product without throwing away the existing codebase.

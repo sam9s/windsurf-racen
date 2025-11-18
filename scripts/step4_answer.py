@@ -174,6 +174,29 @@ def _classify_ack(prev_assistant: str, user_msg: str) -> str:
             "haan", "han ji", "haan ji", "theek hai", "kariye", "kar dijiye", "kar do"
         ]
         new_topic_signals = ["warranty", "refund", "returns", "shipping", "price", "warranty kitna"]
+        # If user mentions a different product family than the previous answer, treat as new topic
+        try:
+            pl = prev.lower()
+            # Collect product family keywords from config + generic nouns
+            cfg_nouns = [kw for fam in PRODUCT_FAMILIES.values() for kw in fam]
+            generic_nouns = [
+                "macbook",
+                "mac book",
+                "mackbook",
+                "iphone",
+                "ipad",
+                "laptop",
+                "notebook",
+                "phone",
+                "mobile",
+            ]
+            all_nouns = list(dict.fromkeys(cfg_nouns + generic_nouns))
+            prev_fams = {n for n in all_nouns if n in pl}
+            user_fams = {n for n in all_nouns if n in u}
+            if prev_fams and user_fams and prev_fams.isdisjoint(user_fams):
+                return "NEW_TOPIC"
+        except Exception:
+            pass
         if any(sig in u for sig in ack_signals) and not any(sig in u for sig in new_topic_signals):
             return "ACK_CONTINUE"
         return "NEW_TOPIC"
@@ -416,6 +439,10 @@ def _compose_prompt(
     if (intent or "").lower() == "product":
         lines.append("- If the question is about a product, provide a brief summary first, then 3-6 short bullets for key specs (e.g., storage, color, condition, warranty, battery health) when present in context.")
         lines.append("- Include the product page link once (choose the clearest matching 'Source:' URL from the provided context headers).")
+        lines.append("- Pay close attention to qualifiers in the user's question like 'retina', year (e.g., 2015), screen size (e.g., 13-inch), storage or RAM. Prefer a product whose title/description matches these qualifiers in the provided context.")
+        lines.append("- If at least one product title or description clearly contains the requested model name or variant from the question, answer about that product using only the provided context.")
+        lines.append("- If no product in the context matches the key qualifiers from the question, clearly say that the exact variant is not available or not found.")
+        lines.append("- However, if a very similar product is present (for example, the same model family without an extra word like 'Pro', 'Max', or 'Plus'), you may briefly describe that closest product while making it explicit that it is a different variant from what the user asked for. Never present the similar product as if it were the exact requested model.")
     return "\n".join(lines)
 
 
@@ -529,7 +556,17 @@ def _detect_intent(query: str) -> str:
         if any(k in q for k in kws):
             return "product"
     # Fallback: generic device nouns if config is missing or incomplete
-    device_nouns = ["macbook", "mac book", "iphone", "ipad", "laptop", "notebook", "phone", "mobile"]
+    device_nouns = [
+        "macbook",
+        "mac book",
+        "mackbook",
+        "iphone",
+        "ipad",
+        "laptop",
+        "notebook",
+        "phone",
+        "mobile",
+    ]
     if any(n in q for n in device_nouns):
         return "product"
     # order/buy intent (broad coverage for EN + Hinglish)
@@ -631,15 +668,50 @@ def _followups_for_intent(intent: str) -> List[str]:
     ]
 
 
+def _classify_intent(query: str, previous_answer: str) -> tuple[str, str]:
+    """Classify high-level intent for the current turn.
+
+    Args:
+        query: Current user message.
+        previous_answer: Last assistant answer in the thread.
+
+    Returns:
+        A tuple of (intent, last_intent) where intent is one of
+        {"product", "returns", "shipping", "contact", "order_buy", "general", "unclear"}.
+    """
+
+    intent = _detect_intent(query)
+    last_intent = _infer_last_intent(previous_answer)
+    ql = (query or "").lower().strip()
+
+    # Basic heuristic for unclear/noisy queries: no alphabetic characters or obvious junk tokens
+    has_alpha = any(ch.isalpha() for ch in ql)
+    noise_tokens = {"???", "????", "asdf", "qwerty"}
+    if (not ql or not has_alpha) and intent == "general":
+        return "unclear", last_intent
+    if any(tok in ql for tok in noise_tokens) and intent == "general":
+        return "unclear", last_intent
+
+    return intent, last_intent
+
+
 def answer_query(
     query: str,
     top_k: int = 6,
     previous_answer: str = "",
     previous_user: str = "",
 ) -> tuple[str, List[Citation]]:
-    # Detect user intent for conversational follow-ups
-    intent = _detect_intent(query)
-    last_intent = _infer_last_intent(previous_answer)
+    # Detect user intent for conversational follow-ups via classifier abstraction
+    intent, last_intent = _classify_intent(query, previous_answer)
+
+    # Early exit for unclear intent: ask user to rephrase instead of guessing
+    if intent == "unclear":
+        mode = _detect_mode(query or previous_user)
+        if mode == "HI_EN":
+            msg = "Mujhe thoda clear nahi hua. Please thoda detail mein ya alag tareeke se bataoge?"
+        else:
+            msg = "I’m not fully sure what you mean. Can you rephrase or add a bit more detail?"
+        return msg, []
 
     # Retrieval with simple, intent-based augmentation (language-agnostic keywords)
     aug = ""
@@ -711,7 +783,17 @@ def answer_query(
                 break
         # Fallback: if no config keyword matched, use generic device nouns
         if not matched:
-            fallback_nouns = ["macbook", "mac book", "iphone", "ipad", "laptop", "notebook", "phone", "mobile"]
+            fallback_nouns = [
+                "macbook",
+                "mac book",
+                "mackbook",
+                "iphone",
+                "ipad",
+                "laptop",
+                "notebook",
+                "phone",
+                "mobile",
+            ]
             for noun in fallback_nouns:
                 if noun in prevl and noun not in aug_query.lower():
                     aug_query = f"{aug_query} {noun}".strip()

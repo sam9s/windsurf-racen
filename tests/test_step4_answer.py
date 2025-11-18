@@ -123,3 +123,54 @@ def test_category_query_uses_product_family_from_config(monkeypatch: pytest.Monk
     q = captured["query"].lower()
     # The retrieval query should include a macbook-family keyword from config
     assert "macbook" in q
+
+
+def test_classify_intent_product_and_returns() -> None:
+    """classify_intent should map obvious product and returns queries correctly."""
+
+    intent, last_intent = sa._classify_intent("do you have macbook air?", "")
+    assert intent == "product"
+    assert last_intent == "general"
+
+    intent2, _ = sa._classify_intent("how do I get a refund?", "")
+    assert intent2 == "returns"
+
+
+def test_unclear_intent_triggers_rephrase_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Very noisy/short queries should use the unclear-intent fallback instead of retrieval."""
+
+    called = {"retrieved": False}
+
+    def fake_retrieve(query: str, top_k: int = 6):  # type: ignore[override]
+        called["retrieved"] = True
+        return [DummyChunk(source="/pages/test", text="Some text")]
+
+    monkeypatch.setattr(sa, "retrieve", fake_retrieve)
+
+    # Extremely short/noisy input
+    answer, cites = sa.answer_query("???", top_k=3)
+    assert not called["retrieved"], "unclear intent path should not hit retrieval"
+    assert not cites
+    low = answer.lower()
+    assert "rephrase" in low or "detail" in low or "clear" in low
+
+
+def test_product_answer_uses_matching_chunk_not_exact_match_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    """If retrieval returns a chunk clearly mentioning 'iPhone 14 Plus', do not use the 'no exact match' fallback."""
+
+    def fake_retrieve(query: str, top_k: int = 6):  # type: ignore[override]
+        text = "Certified Refurbished Apple iPhone 14 Plus with 128GB storage and 6.7-inch display."
+        return [DummyChunk(source="/products/apple-iphone-14-plus-128", text=text)]
+
+    def fake_call_openai(prompt: str, max_retries: int = 3, model: str = "gpt-4o-mini") -> str:  # type: ignore[override]
+        # Simulate a normal product answer from the LLM using the retrieved chunk.
+        return "Yes, we have the iPhone 14 Plus available. Product page: https://grest.in/products/apple-iphone-14-plus-128"
+
+    monkeypatch.setattr(sa, "retrieve", fake_retrieve)
+    monkeypatch.setattr(sa, "_call_openai", fake_call_openai)
+
+    answer, _ = sa.answer_query("do you have iphone 14 plus?", top_k=3)
+    low = answer.lower()
+    # Ensure the strict 'no exact match' fallback phrase is not used when a matching chunk exists
+    assert "couldnt find an exact match" not in low
+    assert "iphone 14 plus" in low
