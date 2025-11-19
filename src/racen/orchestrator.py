@@ -51,6 +51,8 @@ def ingest_url(
     did = doc_id or f"doc_{hash(url) & 0xFFFFFFFF:x}"
     conn = get_conn(DBConfig.from_env())
     ensure_schema(conn, embedding_dim=embedding_dim)
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM documents WHERE id = %s", (did,))
     upsert_document(conn, doc_id=did, source=url)
 
     c_ins = 0

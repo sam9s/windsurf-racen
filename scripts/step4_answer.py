@@ -7,7 +7,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 from urllib.parse import urlparse
 
 
@@ -255,7 +255,8 @@ except Exception:
 
 from racen.log import get_logger
 from racen.step3_retrieve import retrieve, RetrievedChunk
-from racen.product_search import ProductSearchResult, product_search
+from racen.product_search import MatchType, ProductCandidate, ProductSearchResult, product_search
+from racen.product_specs import ProductSpecs, extract_product_specs
 
 logger = get_logger("scripts.step4_answer")
 
@@ -301,6 +302,72 @@ class Citation:
     end_line: int
 
 
+@dataclass
+class ProductAnswerPlan:
+    """Deterministic plan for how to answer a product query.
+
+    Args:
+        requested_text: Original user query text.
+        match_type: Catalog match type (EXACT, CLOSE_BUT_DIFFERENT, NONE).
+        primary: Primary product to talk about in the answer, or None.
+        siblings: Same-base sibling products (e.g., other variants) to optionally mention.
+    """
+
+    requested_text: str
+    match_type: MatchType
+    primary: Optional[ProductCandidate]
+    siblings: List[ProductCandidate]
+
+
+def build_product_answer_plan(query: str, match: Optional[ProductSearchResult]) -> ProductAnswerPlan:
+    """Build a deterministic answer plan from catalog match results.
+
+    This function encodes the high-level behavior for base vs variant queries
+    so that downstream prompt logic does not have to guess. It does not touch
+    retrieval or phrasing; it only decides which products are primary vs
+    siblings and how to label availability.
+
+    Args:
+        query: Raw user query text.
+        match: ProductSearchResult from product_search, or None.
+
+    Returns:
+        ProductAnswerPlan: Structured plan with primary product and siblings.
+    """
+
+    requested = (query or "").strip()
+    if match is None or not match.candidates:
+        return ProductAnswerPlan(
+            requested_text=requested,
+            match_type="NONE",
+            primary=None,
+            siblings=[],
+        )
+
+    # Normalise match_type to one of the known literals.
+    mt: MatchType
+    if match.match_type in {"EXACT", "CLOSE_BUT_DIFFERENT", "NONE"}:
+        mt = match.match_type  # type: ignore[assignment]
+    else:
+        mt = "NONE"
+
+    candidates = list(match.candidates)
+    primary: Optional[ProductCandidate] = None
+    siblings: List[ProductCandidate] = []
+
+    if candidates:
+        primary = candidates[0]
+        if len(candidates) > 1:
+            siblings = candidates[1:]
+
+    return ProductAnswerPlan(
+        requested_text=requested,
+        match_type=mt,
+        primary=primary,
+        siblings=siblings,
+    )
+
+
 def _compose_prompt(
     query: str,
     chunks: List[RetrievedChunk],
@@ -308,6 +375,8 @@ def _compose_prompt(
     previous_answer: str = "",
     previous_user: str = "",
     product_match: Optional[ProductSearchResult] = None,
+    product_plan: Optional[ProductAnswerPlan] = None,
+    product_specs_by_url: Optional[Dict[str, ProductSpecs]] = None,
 ) -> str:
     lines: List[str] = []
     # Persona: prepend system prompt if provided
@@ -439,6 +508,84 @@ def _compose_prompt(
             )
         lines.append("")
 
+    # Provide a deterministic view of the primary product and its sibling
+    # variants from the catalog so the model does not have to infer this
+    # structure from context alone.
+    if (intent or "").lower() == "product" and product_plan is not None:
+        lines.append("Internal product answer plan (do not show to user):")
+        lines.append(f"- Requested text: {product_plan.requested_text}")
+        lines.append(f"- Catalog match type: {product_plan.match_type}")
+        if product_plan.primary is not None:
+            p = product_plan.primary
+            lines.append(
+                "- Primary product: "
+                f"name='{p.name}', base_model='{p.base_model}', "
+                f"variants='{', '.join(p.variant_tokens)}', url='{p.url}'"
+            )
+        if product_plan.siblings:
+            lines.append("- Sibling variants for the same base model:")
+            for sib in product_plan.siblings:
+                lines.append(
+                    f"  * name='{sib.name}', variants='{', '.join(sib.variant_tokens)}', url='{sib.url}'"
+                )
+        lines.append("")
+
+    if (intent or "").lower() == "product" and product_specs_by_url:
+        lines.append("Internal product specs (for model use only, do not show this section to the user):")
+
+        def _append_specs(label: str, cand: ProductCandidate) -> None:
+            sp = product_specs_by_url.get(cand.url)
+            if sp is None:
+                return
+            if not (
+                sp.price_strings
+                or sp.storage_options
+                or sp.conditions
+                or sp.warranty_strings
+                or sp.color_options
+            ):
+                return
+            lines.append(f"- {label} specs for '{cand.name}' (url='{cand.url}'):")
+            if sp.price_strings:
+                lines.append(f"  * prices: {', '.join(sp.price_strings)}")
+            if sp.storage_options:
+                lines.append(f"  * storage_options: {', '.join(sp.storage_options)}")
+            if sp.conditions:
+                lines.append(f"  * conditions: {', '.join(sp.conditions)}")
+            if sp.warranty_strings:
+                lines.append(f"  * warranty: {', '.join(sp.warranty_strings)}")
+            if sp.color_options:
+                lines.append(f"  * colors: {', '.join(sp.color_options)}")
+
+        if product_plan is not None:
+            if product_plan.primary is not None:
+                _append_specs("Primary", product_plan.primary)
+            if product_plan.siblings:
+                for sib in product_plan.siblings:
+                    _append_specs("Sibling", sib)
+        else:
+            for url, sp in product_specs_by_url.items():
+                if not (
+                    sp.price_strings
+                    or sp.storage_options
+                    or sp.conditions
+                    or sp.warranty_strings
+                    or sp.color_options
+                ):
+                    continue
+                lines.append(f"- Specs for product url='{url}':")
+                if sp.price_strings:
+                    lines.append(f"  * prices: {', '.join(sp.price_strings)}")
+                if sp.storage_options:
+                    lines.append(f"  * storage_options: {', '.join(sp.storage_options)}")
+                if sp.conditions:
+                    lines.append(f"  * conditions: {', '.join(sp.conditions)}")
+                if sp.warranty_strings:
+                    lines.append(f"  * warranty: {', '.join(sp.warranty_strings)}")
+                if sp.color_options:
+                    lines.append(f"  * colors: {', '.join(sp.color_options)}")
+        lines.append("")
+
     lines.append("Question:")
     lines.append(query)
     lines.append("")
@@ -466,10 +613,20 @@ def _compose_prompt(
     lines.append("- Do NOT use any external knowledge beyond the provided context.")
     # Product intent: shape answer towards product summary with key specs and link (all grounded)
     if (intent or "").lower() == "product":
-        lines.append("- If the question is about a product, provide a brief summary first, then 3-6 short bullets for key specs (e.g., storage, color, condition, warranty, battery health) when present in context.")
+        lines.append(
+            "- If the question is about a product, first clearly confirm availability in 1 short sentence, "
+            "then provide 3-6 Markdown bullet points for core specs using this pattern when data is present: "
+            "'- **Storage Options**: ...', '- **Condition**: ...', '- **Price**: ...', '- **Warranty**: ...', "
+            "'- **Battery Health**: ...', '- **Colors**: ...'."
+        )
         lines.append("- Include the product page link once. Use only URLs that appear either in the 'Context:' section headers or in the Internal catalog match summary above. Do not invent or guess new URLs or paths.")
         lines.append("- Pay close attention to qualifiers in the user's question like 'retina', year (e.g., 2015), screen size (e.g., 13-inch), storage or RAM. Prefer a product whose title/description matches these qualifiers in the provided context.")
         lines.append("- If at least one product title or description clearly contains the requested model name or variant from the question, answer about that product using only the provided context and/or the Internal catalog match summary.")
+        lines.append("- When product specs are listed in the 'Internal product specs' section above, use only those extracted values for price, storage, condition, warranty, and colors. Do not invent or modify any numeric values or capacities.")
+        lines.append(
+            "- If you see a structured 'Product Details' block in the context (for example with fields like 'Display', 'Rear Camera', 'Front Camera', 'Storage', 'Processor', 'SIM card', 'Connectors', 'Bluetooth', 'Battery', 'Size and weight', 'Operating system', 'Water resistance'), copy those fields into additional Markdown bullets AFTER the core spec bullets, using labels like '**Display**', '**Rear Camera**', etc., and preserve the exact numbers and phrases from the context. Do not add new specs or change any numbers."
+        )
+        lines.append("- If multiple prices appear for a product, treat a line labelled 'Sale price' as the current selling price when present; otherwise, treat the lowest numeric price as the current selling price and mention higher prices (such as MRP) only as reference.")
         # Base vs variant wording, derived from the raw query text.
         # If the user mentions only the base model (e.g., "iphone 13"), treat that as
         # the primary product when it exists, but still surface same-base variants
@@ -478,11 +635,17 @@ def _compose_prompt(
         has_variant_word = any(t in ql_prod for t in [" pro", " max", " mini", " plus"])  # simple heuristic
         if not has_variant_word:
             lines.append(
-                "- When the user asks for a base model (for example, 'iPhone 13'), describe that base product when it exists, and also mention any same-base variants from the context (such as 'iPhone 13 mini' or 'iPhone 13 Pro Max') as additional options with their own links."
+                "- When the user asks for a base model (for example, 'iPhone 13'), describe that base product "
+                "when it exists, and if the Internal product answer plan lists same-base variants (such as "
+                "'iPhone 13 mini' or 'iPhone 13 Pro Max'), you MUST add a section like 'Other variants you can "
+                "consider:' followed by one Markdown bullet per sibling with its full name and product page URL."
             )
         else:
             lines.append(
-                "- When the user asks for a specific variant (for example, 'iPhone 16 Pro' or 'iPhone 13 mini') and that exact variant exists, focus the answer on that variant first, then you may briefly mention other same-base variants as alternatives without confusing them with the requested model."
+                "- When the user asks for a specific variant (for example, 'iPhone 16 Pro' or 'iPhone 13 mini') and "
+                "that exact variant exists in the Internal product answer plan, focus the answer on that variant "
+                "first (with its own specs and URL), then you may briefly list other same-base variants as "
+                "alternatives, clearly labelling them as different options."
             )
         lines.append("- If no product in the context or catalog matches the key qualifiers from the question, clearly say that the exact variant is not available or not found and avoid attaching a specific product URL.")
         lines.append("- If a very similar product is present (for example, the same model family without an extra word like 'Pro', 'Max', or 'Plus'), you may briefly describe that closest product while making it explicit that it is a different variant from what the user asked for. Never present the similar product as if it were the exact requested model.")
@@ -764,8 +927,11 @@ def answer_query(
 
     # For product intents, run catalog-aware product_search (currently iPhone-only)
     # to understand whether the requested model is an exact match, a close
-    # variant (e.g., 16 vs 16 Pro), or not in the catalog at all.
+    # variant (e.g., 16 vs 16 Pro), or not in the catalog at all. Then build a
+    # deterministic answer plan from that match so the prompt does not have to
+    # infer the variant relationships.
     product_match: Optional[ProductSearchResult] = None
+    product_plan: Optional[ProductAnswerPlan] = None
     if intent == "product":
         ql_ps = (query or "").lower()
         family_hint = "iphone" if "iphone" in ql_ps else None
@@ -773,6 +939,10 @@ def answer_query(
             product_match = product_search(query, family_hint=family_hint)
         except Exception:
             product_match = None
+        try:
+            product_plan = build_product_answer_plan(query, product_match)
+        except Exception:
+            product_plan = None
 
     # Early exit for unclear intent: ask user to rephrase instead of guessing
     if intent == "unclear":
@@ -802,15 +972,22 @@ def answer_query(
         aug = " product details specs specifications features price"
     aug_query = (query + aug).strip()
 
+    specs_by_url: Dict[str, ProductSpecs] = {}
+
     # Retrieve (with optional per-intent allowlist boost and facet expansion)
     original_allow = os.getenv("RETRIEVE_SOURCE_ALLOWLIST", "")
 
     def _ensure_in_allowlist(pattern: str) -> None:
-        prim = [p for p in (s.strip() for s in original_allow.split(",")) if p]
+        """Ensure a retrieval allowlist pattern is present for this call.
+
+        This function accumulates patterns on top of the current
+        RETRIEVE_SOURCE_ALLOWLIST value and relies on the outer scope to
+        restore the original_allow at the end of answer_query.
+        """
+        current = os.getenv("RETRIEVE_SOURCE_ALLOWLIST", "")
+        prim = [p for p in (s.strip() for s in current.split(",")) if p]
         if pattern not in prim:
             os.environ["RETRIEVE_SOURCE_ALLOWLIST"] = ",".join(prim + [pattern])
-        else:
-            os.environ["RETRIEVE_SOURCE_ALLOWLIST"] = original_allow
 
     # For product intents, ensure that catalog-backed product pages for the
     # matched base model (and its variants) are explicitly included in the
@@ -916,6 +1093,41 @@ def answer_query(
         # Best-effort: no retrieval, return empty with hint handled by caller
         return "Not found in sources provided.", []
 
+    if intent == "product" and product_match is not None and product_match.candidates:
+        cand_paths: Dict[str, str] = {}
+        for cand in product_match.candidates:
+            try:
+                parsed = urlparse(cand.url)
+                path = parsed.path or cand.url
+            except Exception:
+                path = cand.url
+            key = (path or "").split("?", 1)[0].rstrip("/")
+            if key:
+                cand_paths[key] = cand.url
+        if cand_paths:
+            for ch in items:
+                try:
+                    parsed_src = urlparse(ch.source)
+                    path_src = parsed_src.path or ch.source
+                except Exception:
+                    path_src = ch.source
+                key_src = (path_src or "").split("?", 1)[0].rstrip("/")
+                cand_url = cand_paths.get(key_src)
+                if not cand_url or cand_url in specs_by_url:
+                    continue
+                try:
+                    specs = extract_product_specs(ch.text)
+                except Exception:
+                    continue
+                if (
+                    specs.price_strings
+                    or specs.storage_options
+                    or specs.conditions
+                    or specs.warranty_strings
+                    or specs.color_options
+                ):
+                    specs_by_url[cand_url] = specs
+
     # Build citations list in the same order as chunks appear in prompt
     citations: List[Citation] = []
     for it in items:
@@ -929,6 +1141,8 @@ def answer_query(
         previous_answer=previous_answer,
         previous_user=previous_user,
         product_match=product_match if effective_intent == "product" else None,
+        product_plan=product_plan if effective_intent == "product" else None,
+        product_specs_by_url=specs_by_url if effective_intent == "product" else None,
     )
     txt = _call_openai(prompt)
 
@@ -1030,6 +1244,25 @@ def answer_query(
             if not ctx_has_charges:
                 out_text = _build_fallback_text()
 
+    # Deterministic sibling variants section for product intents so the
+    # base-model flow always lists alternatives.
+    if effective_intent == "product" and product_plan is not None and product_plan.siblings:
+        already_has = "other variants you can consider" in out_text.lower()
+        if not already_has:
+            ql_prod2 = (query or "").lower()
+            has_variant_word2 = any(t in ql_prod2 for t in [" pro", " max", " mini", " plus"])
+            header = "Other variants in the same family:" if has_variant_word2 else "Other variants you can consider:"
+            sib_lines: List[str] = []
+            for sib in product_plan.siblings:
+                name = getattr(sib, "name", "") or ""
+                url = getattr(sib, "url", "") or ""
+                if not name or not url:
+                    continue
+                sib_lines.append(f"- {name}  {url}")
+            if sib_lines:
+                section = "\n".join([header] + sib_lines)
+                out_text = f"{out_text}\n\n{section}"
+
     # Deterministic contact drill-down: if user asked to continue/more details for contact/address
     # Observe-only guard: when ANSWER_ACK_OBSERVE_ONLY is enabled, do not change behavior
     ack_observe_only = os.getenv("ANSWER_ACK_OBSERVE_ONLY", "1") in {"1", "true", "TRUE", "yes"}
@@ -1058,7 +1291,7 @@ def answer_query(
                 out_text = ". ".join(parts2)
 
     # Append a single, mode-aware follow-up line using lexicon snippet
-    if followups_on:
+    if followups_on and effective_intent != "product":
         lower = out_text.lower()
         if "follow-ups:" not in lower and "follow ups:" not in lower:
             # Try to load lexicon snippet for offer_details
