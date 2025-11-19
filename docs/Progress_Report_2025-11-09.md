@@ -242,3 +242,20 @@ Pending
     - Preserve the current tested behaviors (no hallucinated catalog items, clear fallbacks, citations) while gradually adding structure.
 
 These phase definitions keep the current Slack + Answer API MVP on track while explicitly documenting how we will evolve toward a more DB-aware, classifier-driven, multi-category product without throwing away the existing codebase.
+
+### Session / Context Strategy – 2025-11-19
+
+- Slack (current behavior):
+  - The bot sees Slack `user`, `channel`, and `thread_ts` and tracks context per thread in memory (last answer, fallback counts, last intent), but does not persist long-lived per-user profiles.
+- Near-term plan (Phase 1.x):
+  - Keep context light and thread-focused; avoid heavy persistent memory.
+  - Optionally derive a simple `family_hint` (e.g., `iphone`, `macbook`) from the last answer and pass it into `product_search` so follow-ups like "what about 128 GB?" stay on the same product family.
+- Web UI + future personalization:
+  - When the Web UI is introduced, add a small per-user/session store (e.g., Redis or DB-backed sessions):
+    - Key: session ID or logged-in GREST user ID.
+    - Values: last product family, last selected product, language preference, etc.
+    - Sessions expire on logout or inactivity so data is wiped automatically.
+  - `product_search` is designed so it can accept an optional context hint (such as `family_hint`) later, fed from this session layer, without changing its core interface.
+- Principle:
+  - For Phase 1.x, keep RACEN mostly stateless with minimal, explicit context hints.
+  - Defer full per-user personalization and Redis integration until the Web UI phase.

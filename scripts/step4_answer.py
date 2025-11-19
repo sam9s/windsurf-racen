@@ -7,7 +7,8 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List
+from typing import List, Optional
+from urllib.parse import urlparse
 
 
 def _read_text_file(path_str: str) -> str:
@@ -254,6 +255,7 @@ except Exception:
 
 from racen.log import get_logger
 from racen.step3_retrieve import retrieve, RetrievedChunk
+from racen.product_search import ProductSearchResult, product_search
 
 logger = get_logger("scripts.step4_answer")
 
@@ -305,6 +307,7 @@ def _compose_prompt(
     intent: str = "",
     previous_answer: str = "",
     previous_user: str = "",
+    product_match: Optional[ProductSearchResult] = None,
 ) -> str:
     lines: List[str] = []
     # Persona: prepend system prompt if provided
@@ -410,6 +413,32 @@ def _compose_prompt(
         if support_address:
             lines.append(f"- Support address: {support_address}")
         lines.append("")
+    # Inject a small internal catalog match summary for product intents so
+    # the model understands whether the requested variant exists or is only
+    # close to a catalog item, and which URL is authoritative.
+    if (intent or "").lower() == "product" and product_match is not None:
+        if product_match.match_type == "EXACT" and product_match.candidates:
+            cand = product_match.candidates[0]
+            lines.append(
+                "Internal catalog match: exact product found in catalog. "
+                f"Base model '{cand.base_model}', variants '{' '.join(cand.variant_tokens)}', "
+                f"name '{cand.name}', URL '{cand.url}'. Always use this URL as the product page when answering."
+            )
+        elif product_match.match_type == "CLOSE_BUT_DIFFERENT" and product_match.candidates:
+            cand = product_match.candidates[0]
+            lines.append(
+                "Internal catalog match: requested variant not found in catalog. "
+                f"Closest available product is a different variant: name '{cand.name}', "
+                f"base model '{cand.base_model}', variants '{' '.join(cand.variant_tokens)}', URL '{cand.url}'. "
+                "Clearly state that the requested variant is not available and that you are describing this closest available product instead."
+            )
+        elif product_match.match_type == "NONE":
+            lines.append(
+                "Internal catalog match: no product found in catalog for this model. "
+                "Be explicit that this product is not available in the catalog and avoid suggesting a specific product URL."
+            )
+        lines.append("")
+
     lines.append("Question:")
     lines.append(query)
     lines.append("")
@@ -438,11 +467,40 @@ def _compose_prompt(
     # Product intent: shape answer towards product summary with key specs and link (all grounded)
     if (intent or "").lower() == "product":
         lines.append("- If the question is about a product, provide a brief summary first, then 3-6 short bullets for key specs (e.g., storage, color, condition, warranty, battery health) when present in context.")
-        lines.append("- Include the product page link once (choose the clearest matching 'Source:' URL from the provided context headers).")
+        lines.append("- Include the product page link once. Use only URLs that appear either in the 'Context:' section headers or in the Internal catalog match summary above. Do not invent or guess new URLs or paths.")
         lines.append("- Pay close attention to qualifiers in the user's question like 'retina', year (e.g., 2015), screen size (e.g., 13-inch), storage or RAM. Prefer a product whose title/description matches these qualifiers in the provided context.")
-        lines.append("- If at least one product title or description clearly contains the requested model name or variant from the question, answer about that product using only the provided context.")
-        lines.append("- If no product in the context matches the key qualifiers from the question, clearly say that the exact variant is not available or not found.")
-        lines.append("- However, if a very similar product is present (for example, the same model family without an extra word like 'Pro', 'Max', or 'Plus'), you may briefly describe that closest product while making it explicit that it is a different variant from what the user asked for. Never present the similar product as if it were the exact requested model.")
+        lines.append("- If at least one product title or description clearly contains the requested model name or variant from the question, answer about that product using only the provided context and/or the Internal catalog match summary.")
+        # Base vs variant wording, derived from the raw query text.
+        # If the user mentions only the base model (e.g., "iphone 13"), treat that as
+        # the primary product when it exists, but still surface same-base variants
+        # (e.g., mini / pro / pro max / plus) as alternatives.
+        ql_prod = (query or "").lower()
+        has_variant_word = any(t in ql_prod for t in [" pro", " max", " mini", " plus"])  # simple heuristic
+        if not has_variant_word:
+            lines.append(
+                "- When the user asks for a base model (for example, 'iPhone 13'), describe that base product when it exists, and also mention any same-base variants from the context (such as 'iPhone 13 mini' or 'iPhone 13 Pro Max') as additional options with their own links."
+            )
+        else:
+            lines.append(
+                "- When the user asks for a specific variant (for example, 'iPhone 16 Pro' or 'iPhone 13 mini') and that exact variant exists, focus the answer on that variant first, then you may briefly mention other same-base variants as alternatives without confusing them with the requested model."
+            )
+        lines.append("- If no product in the context or catalog matches the key qualifiers from the question, clearly say that the exact variant is not available or not found and avoid attaching a specific product URL.")
+        lines.append("- If a very similar product is present (for example, the same model family without an extra word like 'Pro', 'Max', or 'Plus'), you may briefly describe that closest product while making it explicit that it is a different variant from what the user asked for. Never present the similar product as if it were the exact requested model.")
+        # Use product_match to control how availability is communicated so behavior stays
+        # consistent and dynamic with the catalog.
+        if product_match is not None:
+            if product_match.match_type == "EXACT" and product_match.candidates:
+                lines.append(
+                    "- Since the internal catalog match is EXACT, clearly confirm that the requested model is available and describe that exact product using details from the context and the catalog URL above."
+                )
+            elif product_match.match_type == "CLOSE_BUT_DIFFERENT" and product_match.candidates:
+                lines.append(
+                    "- Since the internal catalog match is CLOSE_BUT_DIFFERENT, explicitly say that the exact requested variant is not available. Then immediately introduce the closest available variant from the catalog (using its name and URL from the Internal catalog match summary) and describe its details (storage, colors, condition, warranty, price) based only on the provided context."
+                )
+            elif product_match.match_type == "NONE":
+                lines.append(
+                    "- Since the internal catalog match is NONE, clearly state that the requested product is not available in the catalog and do not attach any specific product URL. If other related products appear in context, you may mention them generically without pretending they are the requested model."
+                )
     return "\n".join(lines)
 
 
@@ -704,6 +762,18 @@ def answer_query(
     # Detect user intent for conversational follow-ups via classifier abstraction
     intent, last_intent = _classify_intent(query, previous_answer)
 
+    # For product intents, run catalog-aware product_search (currently iPhone-only)
+    # to understand whether the requested model is an exact match, a close
+    # variant (e.g., 16 vs 16 Pro), or not in the catalog at all.
+    product_match: Optional[ProductSearchResult] = None
+    if intent == "product":
+        ql_ps = (query or "").lower()
+        family_hint = "iphone" if "iphone" in ql_ps else None
+        try:
+            product_match = product_search(query, family_hint=family_hint)
+        except Exception:
+            product_match = None
+
     # Early exit for unclear intent: ask user to rephrase instead of guessing
     if intent == "unclear":
         mode = _detect_mode(query or previous_user)
@@ -734,12 +804,27 @@ def answer_query(
 
     # Retrieve (with optional per-intent allowlist boost and facet expansion)
     original_allow = os.getenv("RETRIEVE_SOURCE_ALLOWLIST", "")
+
     def _ensure_in_allowlist(pattern: str) -> None:
         prim = [p for p in (s.strip() for s in original_allow.split(",")) if p]
         if pattern not in prim:
             os.environ["RETRIEVE_SOURCE_ALLOWLIST"] = ",".join(prim + [pattern])
         else:
             os.environ["RETRIEVE_SOURCE_ALLOWLIST"] = original_allow
+
+    # For product intents, ensure that catalog-backed product pages for the
+    # matched base model (and its variants) are explicitly included in the
+    # retrieval allowlist so the LLM can see sibling variants like "iPhone 13"
+    # and "iPhone 13 mini" together.
+    if intent == "product" and product_match is not None and product_match.candidates:
+        for cand in product_match.candidates:
+            try:
+                parsed = urlparse(cand.url)
+                path = parsed.path or cand.url
+                if path:
+                    _ensure_in_allowlist(path)
+            except Exception:
+                continue
     
     # Detect acknowledgement consent (LLM classifier with heuristic fallback)
     ql = (query or "").lower()
@@ -838,11 +923,12 @@ def answer_query(
 
     # Compose and call LLM
     prompt = _compose_prompt(
-        query,
-        items,
+        query=query,
+        chunks=items,
         intent=effective_intent,
         previous_answer=previous_answer,
         previous_user=previous_user,
+        product_match=product_match if effective_intent == "product" else None,
     )
     txt = _call_openai(prompt)
 
