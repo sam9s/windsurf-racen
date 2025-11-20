@@ -254,6 +254,7 @@ except Exception:
     pass
 
 from racen.log import get_logger
+from racen.step2_write import DBConfig, get_conn
 from racen.step3_retrieve import retrieve, RetrievedChunk
 from racen.product_search import MatchType, ProductCandidate, ProductSearchResult, product_search
 from racen.product_specs import ProductSpecs, extract_product_specs
@@ -317,6 +318,79 @@ class ProductAnswerPlan:
     match_type: MatchType
     primary: Optional[ProductCandidate]
     siblings: List[ProductCandidate]
+
+
+def _load_product_specs_for_candidates(match: Optional[ProductSearchResult]) -> Dict[str, ProductSpecs]:
+    """Load structured specs for catalog candidates directly from the corpus.
+
+    Args:
+        match: ProductSearchResult from product_search, or None.
+
+    Returns:
+        Dict[str, ProductSpecs]: Mapping from candidate URL handle to extracted specs.
+    """
+
+    specs_by_url: Dict[str, ProductSpecs] = {}
+    if match is None or not match.candidates:
+        return specs_by_url
+
+    try:
+        conn = get_conn(DBConfig.from_env())
+    except Exception:
+        return specs_by_url
+
+    try:
+        for cand in match.candidates:
+            url = (cand.url or "").strip()
+            if not url or url in specs_by_url:
+                continue
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT c.text
+                        FROM chunks c
+                        JOIN documents d ON c.document_id = d.id
+                        WHERE d.source LIKE %s
+                        ORDER BY c.start_line
+                        """,
+                        (f"{url}%",),
+                    )
+                    rows = cur.fetchall()
+            except Exception:
+                continue
+            if not rows:
+                continue
+            full_text_parts: List[str] = []
+            for row in rows:
+                try:
+                    part = row.get("text") or ""
+                except Exception:
+                    part = ""
+                if part:
+                    full_text_parts.append(str(part))
+            if not full_text_parts:
+                continue
+            full_text = "\n\n".join(full_text_parts)
+            try:
+                specs = extract_product_specs(full_text)
+            except Exception:
+                continue
+            if (
+                specs.price_strings
+                or specs.storage_options
+                or specs.conditions
+                or specs.warranty_strings
+                or specs.color_options
+            ):
+                specs_by_url[url] = specs
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+    return specs_by_url
 
 
 def build_product_answer_plan(query: str, match: Optional[ProductSearchResult]) -> ProductAnswerPlan:
@@ -973,6 +1047,11 @@ def answer_query(
     aug_query = (query + aug).strip()
 
     specs_by_url: Dict[str, ProductSpecs] = {}
+    if intent == "product":
+        try:
+            specs_by_url = _load_product_specs_for_candidates(product_match)
+        except Exception:
+            specs_by_url = {}
 
     # Retrieve (with optional per-intent allowlist boost and facet expansion)
     original_allow = os.getenv("RETRIEVE_SOURCE_ALLOWLIST", "")
