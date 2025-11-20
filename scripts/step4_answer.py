@@ -990,6 +990,55 @@ def _classify_intent(query: str, previous_answer: str) -> tuple[str, str]:
     return intent, last_intent
 
 
+def _classify_product_domain(query: str) -> str:
+    """Classify product-like questions into a finer domain.
+
+    This uses a small LLM prompt to avoid brittle keyword hardcoding while
+    staying cheap. It is only called when the heuristic intent is "product"
+    but the catalog cannot find a concrete model match.
+
+    Domains:
+        - product_specs: asking about availability/price/specs of a specific model.
+        - buying_advice: when/why/if to buy, comparisons, pros/cons.
+        - brand_reputation: ratings, reviews, whether the brand/site is trusted.
+        - generic_support: anything else.
+    """
+
+    q = (query or "").strip()
+    if not q:
+        return "generic_support"
+
+    # If no API key is configured, fall back to treating this as a specs-style
+    # question so behaviour degrades gracefully instead of failing.
+    if not os.getenv("OPENAI_API_KEY"):
+        return "product_specs"
+
+    prompt = (
+        "You classify product-related questions into one of four domains.\n\n"
+        "Domains:\n"
+        "- product_specs: user asks about availability, price, storage, colours, condition, warranty, or specs of a specific model (for example 'do you have iPhone 11', 'what is the price of iPhone 11').\n"
+        "- buying_advice: user asks when/why/if to buy, which model to choose, comparisons, pros/cons, best time to buy, or which option gives better value.\n"
+        "- brand_reputation: user asks about ratings, reviews, trust, customer satisfaction, or overall reputation of a brand or website (for example 'what is the rating of GREST').\n"
+        "- generic_support: other support questions that are not about a specific product's specs, buying advice, or brand reputation.\n\n"
+        f"Question: {q}\n\n"
+        "Return exactly one token: product_specs, buying_advice, brand_reputation, or generic_support."
+    )
+
+    try:
+        label_raw = _call_openai(prompt, max_retries=2, model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"))
+    except Exception:
+        return "product_specs"
+
+    label = (label_raw or "").strip().lower()
+    if "buying_advice" in label:
+        return "buying_advice"
+    if "brand_reputation" in label:
+        return "brand_reputation"
+    if "generic_support" in label:
+        return "generic_support"
+    return "product_specs"
+
+
 def answer_query(
     query: str,
     top_k: int = 6,
@@ -998,6 +1047,7 @@ def answer_query(
 ) -> tuple[str, List[Citation]]:
     # Detect user intent for conversational follow-ups via classifier abstraction
     intent, last_intent = _classify_intent(query, previous_answer)
+    domain_tag = ""
 
     # For product intents, run catalog-aware product_search (currently iPhone-only)
     # to understand whether the requested model is an exact match, a close
@@ -1007,6 +1057,9 @@ def answer_query(
     product_match: Optional[ProductSearchResult] = None
     product_plan: Optional[ProductAnswerPlan] = None
     if intent == "product":
+        # Default domain for clear catalog hits is product_specs; we only
+        # refine further when the catalog cannot find a concrete match.
+        domain_tag = "product_specs"
         ql_ps = (query or "").lower()
         family_hint = "iphone" if "iphone" in ql_ps else None
         try:
@@ -1017,6 +1070,26 @@ def answer_query(
             product_plan = build_product_answer_plan(query, product_match)
         except Exception:
             product_plan = None
+
+        # If there is no concrete catalog match, treat this as an ambiguous
+        # product-like question (for example, generic buying advice) and let a
+        # small classifier decide whether it is really about specs or not.
+        no_catalog_match = (
+            product_match is None
+            or not getattr(product_match, "candidates", None)
+            or getattr(product_match, "match_type", "NONE") == "NONE"
+        )
+        if no_catalog_match:
+            try:
+                domain_tag = _classify_product_domain(query)
+            except Exception:
+                domain_tag = "product_specs"
+            # When the domain is not specs, treat this as a non-product query so
+            # we do not run product specs loaders or product-style prompting.
+            if domain_tag != "product_specs":
+                intent = "general"
+                product_match = None
+                product_plan = None
 
     # Early exit for unclear intent: ask user to rephrase instead of guessing
     if intent == "unclear":
@@ -1047,7 +1120,7 @@ def answer_query(
     aug_query = (query + aug).strip()
 
     specs_by_url: Dict[str, ProductSpecs] = {}
-    if intent == "product":
+    if intent == "product" and domain_tag == "product_specs":
         try:
             specs_by_url = _load_product_specs_for_candidates(product_match)
         except Exception:
@@ -1157,9 +1230,18 @@ def answer_query(
         elif effective_intent == "shipping":
             # Bias retrieval to include the canonical shipping policy page
             _ensure_in_allowlist("/policies/shipping/policy")
+            _ensure_in_allowlist("/pages/shipping")
         elif effective_intent == "product":
             # Bias retrieval toward product pages without hardcoding any product names
             _ensure_in_allowlist("/products/")
+        # Domain-level routing for non-product informational queries so that
+        # buying advice and reputation questions can target the right sources
+        # (blogs, FAQs, reviews) without brittle keyword checks.
+        if domain_tag == "buying_advice" and effective_intent in {"general", "order_buy"}:
+            _ensure_in_allowlist("/blogs/news/")
+            _ensure_in_allowlist("/pages/faqs")
+        if domain_tag == "brand_reputation" and effective_intent in {"general", "order_buy"}:
+            _ensure_in_allowlist("trustpilot.com/review")
         # If user acknowledged and previous answer offered sharing support details, include contact page
         if ack and prev_offered:
             _ensure_in_allowlist("/pages/contact-us")

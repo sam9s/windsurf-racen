@@ -199,11 +199,21 @@ def answer(req: AnswerRequest) -> AnswerResponse:
         f"| allowlist={eff.get('RETRIEVE_SOURCE_ALLOWLIST')} | model={os.getenv('OPENAI_MODEL', 'gpt-4o-mini')}"
         f" | short={os.getenv('ANSWER_SHORT', '')}"
     )
-    if os.getenv("ANSWER_DEBUG_FLAGS", "0") in {"1", "true", "TRUE", "yes"}:
+    debug_on = os.getenv("ANSWER_DEBUG_FLAGS", "0") in {"1", "true", "TRUE", "yes"}
+    if debug_on:
         try:
             dbg = get_last_debug_summary()
             if dbg:
                 ribbon = ribbon + f" | {dbg}"
+        except Exception:
+            pass
+        # In debug mode, surface a compact view of the top citation URLs so
+        # downstream clients (e.g., Slack) can display evidence without
+        # changing their formatting logic.
+        try:
+            if cits:
+                top_cits = ", ".join(c.url for c in cits[:3])
+                ribbon = ribbon + f" | cits={top_cits}"
         except Exception:
             pass
 
