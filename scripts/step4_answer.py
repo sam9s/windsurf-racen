@@ -1049,6 +1049,20 @@ def answer_query(
     intent, last_intent = _classify_intent(query, previous_answer)
     domain_tag = ""
 
+    # For general/order-buy queries that mention Grest or explicit review sites,
+    # run the small domain classifier so we can detect brand_reputation even when
+    # there is no concrete product catalog match. This keeps the decision
+    # LLM-led instead of relying purely on keyword heuristics while still
+    # gating calls to avoid unnecessary cost.
+    ql_brand = (query or "").lower()
+    if intent in {"general", "order_buy"} and any(
+        tok in ql_brand for tok in ["grest", "trustpilot", "mouthshut"]
+    ):
+        try:
+            domain_tag = _classify_product_domain(query)
+        except Exception:
+            domain_tag = ""
+
     # For product intents, run catalog-aware product_search (currently iPhone-only)
     # to understand whether the requested model is an exact match, a close
     # variant (e.g., 16 vs 16 Pro), or not in the catalog at all. Then build a
@@ -1242,6 +1256,7 @@ def answer_query(
             _ensure_in_allowlist("/pages/faqs")
         if domain_tag == "brand_reputation" and effective_intent in {"general", "order_buy"}:
             _ensure_in_allowlist("trustpilot.com/review")
+            _ensure_in_allowlist("mouthshut.com/product-reviews/grest-reviews")
         # If user acknowledged and previous answer offered sharing support details, include contact page
         if ack and prev_offered:
             _ensure_in_allowlist("/pages/contact-us")
@@ -1455,26 +1470,40 @@ def answer_query(
     if followups_on and effective_intent != "product":
         lower = out_text.lower()
         if "follow-ups:" not in lower and "follow ups:" not in lower:
-            # Try to load lexicon snippet for offer_details
-            lex_path = os.getenv(
-                "PERSONA_LEXICON_PATH",
-                str(
-                    ROOT
-                    / ".."
-                    / "Grest_RACEN_Slack_Bot"
-                    / "slack-openai-bot"
-                    / "Persona"
-                    / "lexicon.v1.yaml"
-                ),
-            )
-            lexicon = _read_lexicon(lex_path) if lex_path else {}
             mode = _detect_mode(query)
             offer = None
-            if lexicon:
-                modes = lexicon.get("modes") or {}
-                cfg = modes.get(mode) or {}
-                snips = cfg.get("snippets") or {}
-                offer = snips.get("offer_details")
+            # Domain-specific follow-up for brand reputation so we talk about reviews/links
+            # instead of generic policy wording.
+            if domain_tag == "brand_reputation":
+                if mode == "HI_EN":
+                    offer = (
+                        "Agar chaho to main reviews ka short summary ya direct review "
+                        "links share kar sakti hoon."
+                    )
+                else:
+                    offer = (
+                        "Want a quick summary of the key reviews or the direct review "
+                        "links?"
+                    )
+            else:
+                # Try to load lexicon snippet for offer_details
+                lex_path = os.getenv(
+                    "PERSONA_LEXICON_PATH",
+                    str(
+                        ROOT
+                        / ".."
+                        / "Grest_RACEN_Slack_Bot"
+                        / "slack-openai-bot"
+                        / "Persona"
+                        / "lexicon.v1.yaml"
+                    ),
+                )
+                lexicon = _read_lexicon(lex_path) if lex_path else {}
+                if lexicon:
+                    modes = lexicon.get("modes") or {}
+                    cfg = modes.get(mode) or {}
+                    snips = cfg.get("snippets") or {}
+                    offer = snips.get("offer_details")
             if offer:
                 # Optionally inline the follow-up into the first paragraph for reliable Slack display
                 try:
@@ -1484,7 +1513,9 @@ def answer_query(
                 if tone == "upset":
                     emoji_level = 0
                 suffix = ""
-                if emoji_level > 0 and not any(e in offer for e in ["🙂", "✅", "😊", "😉"]):
+                if emoji_level > 0 and not any(
+                    e in offer for e in ["🙂", "✅", "😊", "😉"]
+                ):
                     suffix = " 🙂"
                 if emoji_level > 0:
                     parts = out_text.split("\n\n", 1)

@@ -259,3 +259,68 @@ These phase definitions keep the current Slack + Answer API MVP on track while e
 - Principle:
   - For Phase 1.x, keep RACEN mostly stateless with minimal, explicit context hints.
   - Defer full per-user personalization and Redis integration until the Web UI phase.
+
+## Update – 2025-11-20 (Product Specs, Intent Routing, and E2E Tests)
+
+### Completed Since Last Update
+
+- **Catalog-backed product specs from Grest pages**
+  - Implemented a direct product-specs path that:
+    - Uses the iPhone product catalog (YAML) to identify canonical `/products/*` URLs.
+    - Fetches corresponding chunks from Postgres and runs `extract_product_specs` to build structured specs (price, storage, condition, warranty, colors).
+    - Wires these specs into `answer_query` only for clear product intents so price/spec answers are stable even when retrieval ranking changes.
+
+- **Domain intent and source-bucket routing**
+  - Introduced a small domain classifier for ambiguous product-like queries to distinguish:
+    - `product_specs` vs `buying_advice` vs `brand_reputation` vs `generic_support`.
+  - Updated `answer_query` so:
+    - Product-like queries with no exact catalog match can be re-routed to blogs/FAQs (`buying_advice`) or Trust/reputation sources (`brand_reputation`) instead of falling back to noisy product flows.
+    - Retrieval allowlists are expanded per-domain (e.g., `/blogs/news/`, `/pages/faqs/`), keeping product specs logic isolated to true product queries.
+
+- **Query-flow end-to-end tests using real corpus**
+  - Added pytest-based E2E tests that call `answer_query` end-to-end (DB + retrieval + LLM) for:
+    - Product queries (e.g., iPhone 11) ensuring specs (price, storage) are surfaced from real pages.
+    - Shipping queries hitting `/pages/shipping` / `/policies/shipping/policy`.
+    - Warranty queries hitting `/pages/warranty`.
+    - Generic/blog buying-advice queries hitting `/blogs/news/*`.
+  - These tests no longer use dummy chunks; they verify real URLs and answer snippets from the ingested Grest corpus.
+
+- **Re-ingestion overwrite semantics**
+  - Updated the orchestrator ingest flow so re-ingesting a URL deletes the old document + chunks + embeddings before inserting new ones.
+  - Added tests to confirm overwrite behavior so RACEN always answers from the latest page content.
+
+- **Citation visibility in Answer API ribbon (debug)**
+  - Extended the Answer API `/answer` response when `ANSWER_DEBUG_FLAGS=1` to include a compact `cits=` field in the settings ribbon:
+    - Shows the top 3 citation URLs used in the answer.
+    - Allows Slack and CLI to display which sources were used without changing frontend logic.
+  - This is enabled only in debug mode and can be turned off later for production UIs.
+
+### Updated Next Actions (Phase 1 – next 4–5 days)
+
+1) **Trustpilot / Brand Reputation (Phase 1.1)**
+   - Ingest the Grest Trustpilot profile into Postgres/pgvector as an External source.
+   - Extend domain routing so `brand_reputation` queries (e.g., "why should I buy from Grest?", "are you trustworthy?", "what is your rating?"):
+     - Prefer Trustpilot content + key on-site pages (e.g., about/why-Grest), with clear External labeling.
+   - Add tests to verify:
+     - Trustpilot URLs appear in citations for reputation queries.
+     - Answers summarize rating, review volume, and a small number of representative quotes.
+
+2) **Guardrailed Web Comparison via Advanced Web Researcher (Phase 1.2)**
+   - Integrate the advanced web researcher from `ottomator-agents-main/advanced-web-researcher` (Brave search API) as a narrow, internal web-search tool.
+   - Only RACEN decides when to call web search, based on semantic patterns such as:
+     - "difference between iphone 14 and iphone 17"
+     - "iphone 14 vs iphone 15 which is better"
+   - Guardrails:
+     - Users cannot directly command a web search; the backend chooses to use it only for specific comparison/reputation-style intents.
+     - Answers clearly label web-sourced content as External and include citations.
+   - Add tests with the web client mocked to ensure:
+     - Comparison intents trigger a single web-search call.
+     - Answers mention both models and surface the stubbed External URLs as citations.
+
+3) **Minimal RACEN Web UI Embedded on GREST (Phase 1.3)**
+   - Build a minimal web UI (single chat box with history) that calls the existing `/answer` API:
+     - Show answers in a simple chat layout.
+     - Optionally show the settings ribbon and/or citations in a developer/debug view.
+   - Plan how to embed this UI into the Grest website (e.g., dedicated page or embedded widget) for the Phase 1 demo.
+   - Smoke tests:
+     - Verify the Web UI can run the same core flows as Slack (product Q&A, policy questions, Trustpilot reputation, and one comparison query).
