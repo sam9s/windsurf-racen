@@ -62,6 +62,34 @@ def _load_product_families() -> dict:
 
 PRODUCT_FAMILIES = _load_product_families()
 
+
+def _load_blog_news_urls() -> list[str]:
+    """Load blog/news article URLs from grest_blog_news.yaml if present.
+
+    This is used to lightly bias retrieval for specific buying-advice
+    questions (for example, "best time to buy iphone") toward the most
+    relevant blog article, without hardcoding full URLs in code.
+    """
+
+    project_root = Path(__file__).resolve().parents[1]
+    cfg_path = project_root / "Grest_Data" / "grest_blog_news.yaml"
+    if not cfg_path.exists():
+        return []
+    data = _read_lexicon(str(cfg_path)) or {}
+    urls = data.get("blogs") or []
+    out: list[str] = []
+    for raw in urls:
+        try:
+            u = str(raw).strip()
+        except Exception:
+            continue
+        if u:
+            out.append(u)
+    return out
+
+
+BLOG_NEWS_URLS = _load_blog_news_urls()
+
 def _detect_mode(text: str) -> str:
     t = (text or "").lower()
     # naive signals for Hinglish
@@ -144,6 +172,47 @@ def _limit_first_bubble(text: str, max_sent: int = 2) -> str:
         i += 1
     limited_first = ''.join(out).strip()
     return limited_first if not rest else f"{limited_first}\n\n{rest}"
+
+
+def _strip_followup_tail(text: str) -> str:
+    """Strip trailing follow-up-style prompts from an answer.
+
+    This is a best-effort deterministic filter used when follow-ups are
+    disabled. It removes endings like "If you need more details, let me
+    know" or "Feel free to ask" when they appear near the end of the
+    message, without touching the main informational content.
+    """
+
+    t = (text or "").rstrip()
+    if not t:
+        return t
+    lower = t.lower()
+    cues = [
+        "if you need more details",
+        "if you need more information",
+        "if you need any more details",
+        "if you want, i can",
+        "if you want i can",
+        "if you want to",
+        "would you like",
+        "let me know if",
+        "feel free to ask",
+        "feel free to reach out",
+        "feel free to contact",
+        "i can also help with",
+        "i can help with",
+    ]
+    cut = -1
+    for cue in cues:
+        idx = lower.rfind(cue)
+        if idx != -1 and idx > cut:
+            cut = idx
+    if cut == -1:
+        return t
+    # Only strip when the cue appears near the end (last ~300 characters)
+    if cut < len(t) - 300:
+        return t
+    return t[:cut].rstrip()
 
 
 def _infer_last_intent(prev_ans: str) -> str:
@@ -258,6 +327,7 @@ from racen.step2_write import DBConfig, get_conn
 from racen.step3_retrieve import retrieve, RetrievedChunk
 from racen.product_search import MatchType, ProductCandidate, ProductSearchResult, product_search
 from racen.product_specs import ProductSpecs, extract_product_specs
+from racen.web_comparison import search_comparison
 
 logger = get_logger("scripts.step4_answer")
 
@@ -451,6 +521,8 @@ def _compose_prompt(
     product_match: Optional[ProductSearchResult] = None,
     product_plan: Optional[ProductAnswerPlan] = None,
     product_specs_by_url: Optional[Dict[str, ProductSpecs]] = None,
+    domain_tag: str = "",
+    is_comparison: bool = False,
 ) -> str:
     lines: List[str] = []
     # Persona: prepend system prompt if provided
@@ -525,6 +597,12 @@ def _compose_prompt(
         )
         lines.append(
             "If contacting support may help, optionally offer to share the support phone/email (do not invent details)."
+        )
+    else:
+        # When follow-ups are disabled, be explicit so the model does not
+        # append open-ended prompts like 'Would you like more details?'.
+        lines.append(
+            "Do not ask the user any follow-up questions and do not propose next actions. Just answer the current question directly and stop."
         )
     # Provide the previous assistant message to help the model interpret short acknowledgements
     if previous_answer:
@@ -685,6 +763,20 @@ def _compose_prompt(
         lines.append("- Provide a concise answer (3-6 sentences).")
         lines.append("- Do not add inline [n] markers or a 'Citations' section; the caller will attach citations separately.")
     lines.append("- Do NOT use any external knowledge beyond the provided context.")
+    # Brand reputation guidance: explicitly refer to review sites when summarising ratings.
+    dt = (domain_tag or "").lower()
+    if dt == "brand_reputation":
+        lines.append(
+            "- This question is about brand reputation and customer reviews. Use the review context (for example from Trustpilot or Mouthshut) to answer. When you describe ratings, explicitly name the review site (such as 'Trustpilot' or 'Mouthshut') instead of only saying 'TrustScore'."
+        )
+        lines.append(
+            "- If the context includes both Trustpilot and Mouthshut reviews, briefly mention both sources and keep the wording neutral and factual."
+        )
+    # Comparison guidance: structure answer as a comparison between the main options.
+    if is_comparison:
+        lines.append(
+            "- This is a comparison-style question (for example 'X vs Y' or 'difference between A and B'). Based only on the provided context (including any external web sources), describe each main option and then clearly summarise the key differences and who each option may suit better. Do not invent models or claims that are not supported by the context."
+        )
     # Product intent: shape answer towards product summary with key specs and link (all grounded)
     if (intent or "").lower() == "product":
         lines.append(
@@ -990,6 +1082,131 @@ def _classify_intent(query: str, previous_answer: str) -> tuple[str, str]:
     return intent, last_intent
 
 
+def _is_comparison_query(query: str) -> bool:
+    """Heuristic detector for comparison-style queries.
+
+    This is intentionally narrow and only returns True for patterns like:
+    - "iphone 14 vs iphone 15"
+    - "difference between iphone 14 and iphone 15"
+    - "Grest vs Cashify which is better"
+
+    We scope this to phones and a few key brands/sites so we do not
+    accidentally treat generic questions as web comparisons.
+    """
+
+    q = (query or "").lower().strip()
+    if not q:
+        return False
+
+    # Direct comparison cues like "x vs y" or "difference between a and b".
+    direct_patterns = [
+        " vs ",
+        " versus ",
+        "difference between",
+        "diff between",
+        "compare ",
+        "comparison between",
+    ]
+    has_direct = any(pat in q for pat in direct_patterns)
+
+    # Natural-language pattern: "which is better X or Y" (or "which one is better").
+    # We also allow more free-form variants like "what one is better X or Y" as
+    # long as "better" and "or" both appear.
+    better_patterns = [
+        "which is better",
+        "which one is better",
+        "what is better",
+        "what's better",
+        "what one is better",
+    ]
+    has_better_phrase = any(pat in q for pat in better_patterns) or (
+        " better " in q and " or " in q
+    )
+    has_or = " or " in q
+
+    if not (has_direct or (has_better_phrase and has_or)):
+        return False
+
+    entities = [
+        "iphone",
+        "phone",
+        "mobile",
+        "grest",
+        "cashify",
+        "amazon",
+        "flipkart",
+    ]
+    if not any(ent in q for ent in entities):
+        return False
+
+    return True
+
+
+def _classify_comparison_intent_llm(query: str) -> bool:
+    """Small LLM-based classifier for comparison-style intent.
+
+    Returns True when the question is primarily asking to compare or choose
+    between two or more phones/brands/models (for example, "which is better
+    iPhone 13 or iPhone 14?", "Grest vs Cashify which is better?"), even when
+    the heuristic detector does not catch the exact phrasing.
+
+    This helper is intentionally narrow and cost-aware:
+    - Only runs when web comparison is enabled and an OpenAI API key is set.
+    - Only considers queries that mention known product/brand entities.
+    - Falls back to False on any error.
+    """
+
+    q = (query or "").strip()
+    if not q:
+        return False
+
+    # Fast guard: only consider queries that mention phones/brands we care about.
+    ql = q.lower()
+    entities = [
+        "iphone",
+        "phone",
+        "mobile",
+        "grest",
+        "cashify",
+        "amazon",
+        "flipkart",
+    ]
+    if not any(ent in ql for ent in entities):
+        return False
+
+    # Only run the LLM router when web comparison is enabled and an API key is
+    # available. This keeps behaviour aligned with Phase 1.2 and avoids extra
+    # cost when comparison is not in use.
+    if os.getenv("ENABLE_WEB_COMPARISON", "0") not in {"1", "true", "TRUE", "yes"}:
+        return False
+    if not os.getenv("OPENAI_API_KEY"):
+        return False
+
+    # Optional explicit toggle in case we ever want to disable the LLM router
+    # while keeping web comparison enabled.
+    if os.getenv("ENABLE_LLM_COMPARISON_ROUTER", "1") not in {"1", "true", "TRUE", "yes"}:
+        return False
+
+    prompt = (
+        "You classify whether a user question is PRIMARILY asking to compare or "
+        "choose between two or more phones, models, or brands.\\n\\n"
+        "Return exactly one token: comparison or non_comparison.\\n\\n"
+        f"Question: {q}\\n"
+    )
+
+    try:
+        label_raw = _call_openai(
+            prompt,
+            max_retries=2,
+            model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+        )
+    except Exception:
+        return False
+
+    label = (label_raw or "").strip().lower()
+    return "comparison" in label
+
+
 def _classify_product_domain(query: str) -> str:
     """Classify product-like questions into a finer domain.
 
@@ -1007,6 +1224,10 @@ def _classify_product_domain(query: str) -> str:
     q = (query or "").strip()
     if not q:
         return "generic_support"
+
+    ql = q.lower()
+    if "best time to buy" in ql or "best time of year to buy" in ql:
+        return "buying_advice"
 
     # If no API key is configured, fall back to treating this as a specs-style
     # question so behaviour degrades gracefully instead of failing.
@@ -1104,6 +1325,25 @@ def answer_query(
                 intent = "general"
                 product_match = None
                 product_plan = None
+
+    # Detect whether this is a comparison-style query (e.g. "X vs Y"). This is
+    # used both to optionally add external web comparison context and to shape
+    # the prompt instructions. We first use a narrow heuristic detector and
+    # then, only when that fails, fall back to a small LLM router so that more
+    # natural phrasings like "what would you pick, iPhone 13 or 14?" are still
+    # recognised as comparisons.
+    comparison_query = _is_comparison_query(query)
+    if not comparison_query:
+        try:
+            comparison_query = _classify_comparison_intent_llm(query)
+        except Exception:
+            comparison_query = False
+    # Buying-advice questions like "best time to buy" are not product-vs-product
+    # comparisons; avoid treating them as comparison queries even if the LLM
+    # router misclassifies them.
+    q_lower_for_comp = (query or "").lower()
+    if "best time to buy" in q_lower_for_comp:
+        comparison_query = False
 
     # Early exit for unclear intent: ask user to rephrase instead of guessing
     if intent == "unclear":
@@ -1250,10 +1490,12 @@ def answer_query(
             _ensure_in_allowlist("/products/")
         # Domain-level routing for non-product informational queries so that
         # buying advice and reputation questions can target the right sources
-        # (blogs, FAQs, reviews) without brittle keyword checks.
+        # (blogs, FAQs, reviews) without brittle keyword checks. For
+        # buying_advice, keep behaviour simple and bias toward blogs only;
+        # allowlists for FAQs and policies are handled separately via
+        # RETRIEVE_BACKOFF_SECONDARY.
         if domain_tag == "buying_advice" and effective_intent in {"general", "order_buy"}:
             _ensure_in_allowlist("/blogs/news/")
-            _ensure_in_allowlist("/pages/faqs")
         if domain_tag == "brand_reputation" and effective_intent in {"general", "order_buy"}:
             _ensure_in_allowlist("trustpilot.com/review")
             _ensure_in_allowlist("mouthshut.com/product-reviews/grest-reviews")
@@ -1268,6 +1510,37 @@ def answer_query(
     if not items:
         # Best-effort: no retrieval, return empty with hint handled by caller
         return "Not found in sources provided.", []
+
+    # Optional external web comparison augmentation for comparison-style queries.
+    # This uses SerpAPI DuckDuckGo via racen.web_comparison.search_comparison and
+    # is additionally gated by ENABLE_WEB_COMPARISON inside that helper.
+    try:
+        if comparison_query:
+            web_results = search_comparison(query, max_results=3)
+            if web_results:
+                for idx, w in enumerate(web_results, 1):
+                    src = (getattr(w, "url", "") or "").strip()
+                    title = (getattr(w, "title", "") or "").strip()
+                    snippet = (getattr(w, "snippet", "") or "").strip()
+                    if not src or not snippet:
+                        continue
+                    text = f"{title}\n\n{snippet}" if title else snippet
+                    items.append(
+                        RetrievedChunk(
+                            chunk_id=f"web-{idx}",
+                            document_id="web",
+                            source=src,
+                            text=text,
+                            start_line=1,
+                            end_line=len(text.splitlines()) or 1,
+                            score=1.0,
+                            score_vector=1.0,
+                            score_lexical=0.0,
+                        )
+                    )
+    except Exception:
+        # Web comparison is best-effort; never break the main flow.
+        pass
 
     if intent == "product" and product_match is not None and product_match.candidates:
         cand_paths: Dict[str, str] = {}
@@ -1309,6 +1582,17 @@ def answer_query(
     for it in items:
         citations.append(Citation(url=it.source, start_line=it.start_line, end_line=it.end_line))
 
+    # For product intents backed by the internal catalog, ensure that the
+    # canonical primary product URL also appears in the citations even if it was
+    # not among the retrieved chunk sources. This keeps the surfaced product
+    # page aligned with the catalog when answering availability/spec queries.
+    if effective_intent == "product" and product_plan is not None and product_plan.primary is not None:
+        primary_url = (product_plan.primary.url or "").strip()
+        if primary_url:
+            seen_urls = {c.url for c in citations}
+            if primary_url not in seen_urls:
+                citations.append(Citation(url=primary_url, start_line=1, end_line=1))
+
     # Compose and call LLM
     prompt = _compose_prompt(
         query=query,
@@ -1319,6 +1603,8 @@ def answer_query(
         product_match=product_match if effective_intent == "product" else None,
         product_plan=product_plan if effective_intent == "product" else None,
         product_specs_by_url=specs_by_url if effective_intent == "product" else None,
+        domain_tag=domain_tag,
+        is_comparison=comparison_query,
     )
     txt = _call_openai(prompt)
 
@@ -1407,6 +1693,10 @@ def answer_query(
             return "\n\n".join(pieces2)
 
     out_text = _strip_inline_citations(txt)
+    # When follow-ups are disabled, strip common follow-up style tails so the
+    # model cannot invite the user to ask more questions.
+    if not followups_on:
+        out_text = _strip_followup_tail(out_text)
     low = out_text.strip().lower()
     if fallback_on and (low.startswith("not found in sources provided")):
         out_text = _build_fallback_text()
@@ -1623,7 +1913,10 @@ def answer_query(
         out_text = f"{out_text}\n\n{esc_text}"
     global _LAST_DEBUG
     _LAST_DEBUG = (
-        f"intent={intent} | last_intent={last_intent} | eff_intent={effective_intent} | ack={int(ack)} | more_details={int(more_details)} | top_score={top_score:.2f} | fallback={int(fallback_used)} | lang_target={target_mode} | lang_out={current_mode} | tone={tone}"
+        f"intent={intent} | last_intent={last_intent} | eff_intent={effective_intent} | "
+        f"domain_tag={domain_tag or ''} | comp={int(bool(comparison_query))} | "
+        f"ack={int(ack)} | more_details={int(more_details)} | top_score={top_score:.2f} | "
+        f"fallback={int(fallback_used)} | lang_target={target_mode} | lang_out={current_mode} | tone={tone}"
     )
 
     return out_text, citations
