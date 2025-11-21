@@ -1713,21 +1713,26 @@ def answer_query(
     # Deterministic sibling variants section for product intents so the
     # base-model flow always lists alternatives.
     if effective_intent == "product" and product_plan is not None and product_plan.siblings:
-        already_has = "other variants you can consider" in out_text.lower()
-        if not already_has:
-            ql_prod2 = (query or "").lower()
-            has_variant_word2 = any(t in ql_prod2 for t in [" pro", " max", " mini", " plus"])
-            header = "Other variants in the same family:" if has_variant_word2 else "Other variants you can consider:"
-            sib_lines: List[str] = []
-            for sib in product_plan.siblings:
-                name = getattr(sib, "name", "") or ""
-                url = getattr(sib, "url", "") or ""
-                if not name or not url:
-                    continue
-                sib_lines.append(f"- {name}  {url}")
-            if sib_lines:
-                section = "\n".join([header] + sib_lines)
-                out_text = f"{out_text}\n\n{section}"
+        low_text = out_text.lower()
+        for marker in ("other variants you can consider", "other variants in the same family"):
+            idx = low_text.find(marker)
+            if idx != -1:
+                out_text = out_text[:idx].rstrip()
+                low_text = out_text.lower()
+                break
+        ql_prod2 = (query or "").lower()
+        has_variant_word2 = any(t in ql_prod2 for t in [" pro", " max", " mini", " plus"])
+        header = "Other variants in the same family:" if has_variant_word2 else "Other variants you can consider:"
+        sib_lines: List[str] = []
+        for sib in product_plan.siblings:
+            name = getattr(sib, "name", "") or ""
+            url = getattr(sib, "url", "") or ""
+            if not name or not url:
+                continue
+            sib_lines.append(f"- [{name}]({url})")
+        if sib_lines:
+            section = "\n".join([header] + sib_lines)
+            out_text = f"{out_text}\n\n{section}"
 
     # Deterministic contact drill-down: if user asked to continue/more details for contact/address
     # Observe-only guard: when ANSWER_ACK_OBSERVE_ONLY is enabled, do not change behavior

@@ -144,6 +144,9 @@ Partially Done
 - Targeted single-URL runs for clarity; verify chunks>0 after each.
 - Keep ingestion local (no Drive mounts). Backup DB after batch completes.
 - Scale to full-site after core pages validated via Slack.
+- Utility scripts:
+  - `scripts/bulk_ingest_from_yaml.py`: bulk-ingest URLs from `Grest_Data` YAML configs into Postgres/docling via `racen.orchestrator.ingest_url`.
+  - `scripts/check_docling_urls_from_yaml.py`: sanity-check that all URLs from `Grest_Data` YAML configs exist in `docling.documents.source` and print any missing URLs.
 
 ## Operational Notes
 - Keep Google Drive sync paused during heavy runs; unpause to sync reports/changes when idle.
