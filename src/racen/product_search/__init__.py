@@ -282,3 +282,20 @@ def product_search(
         return ProductSearchResult(match_type="CLOSE_BUT_DIFFERENT", candidates=close)
 
     return ProductSearchResult(match_type="NONE", candidates=[])
+
+
+def list_family_products(family: str) -> List[ProductCandidate]:
+    """Return all catalog products for a given family.
+
+    Args:
+        family (str): Canonical family slug (for example, "iphone").
+
+    Returns:
+        List[ProductCandidate]: Catalog products belonging to the family.
+    """
+
+    fam = (family or "").strip().lower()
+    # Reason: For now, only iPhone products are modeled as a structured catalog.
+    if fam == "iphone":
+        return list(_load_iphone_catalog())
+    return []

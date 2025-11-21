@@ -325,7 +325,13 @@ except Exception:
 from racen.log import get_logger
 from racen.step2_write import DBConfig, get_conn
 from racen.step3_retrieve import retrieve, RetrievedChunk
-from racen.product_search import MatchType, ProductCandidate, ProductSearchResult, product_search
+from racen.product_search import (
+    MatchType,
+    ProductCandidate,
+    ProductSearchResult,
+    list_family_products,
+    product_search,
+)
 from racen.product_specs import ProductSpecs, extract_product_specs
 from racen.web_comparison import search_comparison
 
@@ -899,6 +905,37 @@ def _rewrite_language(text: str, target_mode: str) -> str:
         return text
 
 
+def _detect_family_from_query(query: str) -> str:
+    """Detect the high-level product family from the query.
+
+    This uses the PRODUCT_FAMILIES config as the primary source and falls back
+    to a small set of generic nouns. The function intentionally returns a
+    single family slug (for example, "iphone") or an empty string.
+
+    Args:
+        query: Raw user query text.
+
+    Returns:
+        str: Detected family slug or an empty string when none is found.
+    """
+
+    q = (query or "").lower()
+    for fam_name, kws in PRODUCT_FAMILIES.items():
+        for kw in kws:
+            if kw in q:
+                return fam_name
+    # Fallback on generic nouns for robustness if config is incomplete.
+    generic = {
+        "iphone": ["iphone", "iphones"],
+        "macbook": ["macbook", "mac book", "macbooks", "mackbooks"],
+    }
+    for fam_name, kws in generic.items():
+        for kw in kws:
+            if kw in q:
+                return fam_name
+    return ""
+
+
 def _detect_intent(query: str) -> str:
     q = (query or "").lower()
     if any(k in q for k in ["return", "refund", "cancel", "exchange"]):
@@ -1260,6 +1297,267 @@ def _classify_product_domain(query: str) -> str:
     return "product_specs"
 
 
+def _extract_price_value(price_str: str) -> Optional[int]:
+    """Extract a numeric rupee value from a price string.
+
+    Args:
+        price_str: Raw price text, for example " 49,999" or "Rs. 44999".
+
+    Returns:
+        Optional[int]: Parsed integer price in rupees, or None when parsing
+        fails.
+    """
+
+    if not price_str:
+        return None
+    # Reason: price_strings are already short snippets; removing commas lets us
+    # parse values like "49,999" safely.
+    cleaned = price_str.replace(",", "")
+    m = re.search(r"(\d{4,7})", cleaned)
+    if not m:
+        return None
+    try:
+        return int(m.group(1))
+    except ValueError:
+        return None
+
+
+def _parse_price_filter(query: str) -> tuple[Optional[int], Optional[int], bool, bool]:
+    """Parse a simple price filter (under/between/most/cheapest) from text.
+
+    This is deliberately narrow and only looks for 4-7 digit numbers, treating
+    them as rupee amounts.
+
+    Args:
+        query: Raw user query text.
+
+    Returns:
+        Tuple[min_price, max_price, most_expensive_only, cheapest_only]. Values
+        are in rupees when present.
+    """
+
+    q = (query or "").lower()
+    if not q:
+        return None, None, False
+
+    q_norm = q.replace(",", "")
+    nums: List[int] = []
+    for m in re.finditer(r"\b(\d{4,7})\b", q_norm):
+        try:
+            nums.append(int(m.group(1)))
+        except ValueError:
+            continue
+
+    most_expensive = any(
+        phrase in q
+        for phrase in [
+            "most expensive",
+            "costliest",
+            "highest price",
+            "highest-priced",
+            "highest priced",
+        ]
+    )
+
+    cheapest_only = any(
+        phrase in q
+        for phrase in [
+            "cheapest",
+            "least expensive",
+            "lowest price",
+            "lowest priced",
+        ]
+    )
+
+    if len(nums) >= 2 and ("between" in q or ("from" in q and "to" in q)):
+        lo = min(nums)
+        hi = max(nums)
+        return lo, hi, most_expensive, cheapest_only
+
+    if nums and any(kw in q for kw in ["under", "below", "less than", "upto", "up to"]):
+        hi = min(nums)
+        return None, hi, most_expensive, cheapest_only
+
+    if nums and any(kw in q for kw in ["over", "more than", "greater than", "above"]):
+        lo = max(nums)
+        return lo, None, most_expensive, cheapest_only
+
+    return None, None, most_expensive, cheapest_only
+
+
+def _extract_requested_iphone_label(query: str) -> Optional[str]:
+    """Extract a human-readable iPhone label from the query, if present.
+
+    Args:
+        query: Raw user query text.
+
+    Returns:
+        Optional[str]: Short label such as "iPhone 11" or "iPhone 14 Pro",
+        or None when we cannot confidently parse one.
+    """
+
+    if not query:
+        return None
+    m = re.search(
+        r"(iphone\s+[0-9a-z]{1,4}(?:\s+(?:pro|max|mini|plus))?)",
+        query,
+        flags=re.IGNORECASE,
+    )
+    if not m:
+        return None
+    return m.group(1).strip()
+
+
+def _build_iphone_family_answer(query: str) -> Optional[str]:
+    """Build a deterministic family/price answer for iPhone catalog queries.
+
+    This helper is used when the internal catalog cannot find a concrete
+    iPhone model match but the user clearly asked about iPhones (for example,
+    "what all iPhones you have" or "iPhones under 50,000"). It lists up to
+    three catalog-backed iPhones using structured prices when available.
+
+    Args:
+        query: Raw user query text.
+
+    Returns:
+        Optional[str]: Ready-to-send answer text, or None when we cannot build
+        a robust family answer (for example, no catalog data or no reliable
+        prices for any product).
+    """
+
+    family = _detect_family_from_query(query)
+    if family != "iphone":
+        return None
+
+    catalog: List[ProductCandidate] = list_family_products("iphone")
+    if not catalog:
+        return None
+
+    # Load structured specs (mainly prices) for all catalog entries.
+    try:
+        match_all = ProductSearchResult(match_type="EXACT", candidates=catalog)
+    except Exception:
+        match_all = None  # type: ignore[assignment]
+
+    specs_by_url: Dict[str, ProductSpecs] = {}
+    if match_all is not None:
+        try:
+            specs_by_url = _load_product_specs_for_candidates(match_all)
+        except Exception:
+            specs_by_url = {}
+
+    items: List[tuple[ProductCandidate, Optional[ProductSpecs], Optional[int], str]] = []
+    for cand in catalog:
+        url = (getattr(cand, "url", "") or "").strip()
+        sp = specs_by_url.get(url)
+        price_val: Optional[int] = None
+        display_price = ""
+        if sp and sp.price_strings:
+            for raw_p in sp.price_strings:
+                val = _extract_price_value(raw_p)
+                if val is not None:
+                    price_val = val
+                    display_price = raw_p
+                    break
+        items.append((cand, sp, price_val, display_price))
+
+    min_price, max_price, most_expensive_only, cheapest_only = _parse_price_filter(query)
+
+    priced = [it for it in items if it[2] is not None]
+
+    # For strict price-range queries, be honest when we lack numeric prices.
+    if (min_price is not None or max_price is not None) and not priced:
+        return (
+            "I couldn't reliably see price data for iPhones yet, so I can't "
+            "answer that price range accurately."
+        )
+
+    if min_price is not None or max_price is not None:
+        filtered: List[tuple[ProductCandidate, Optional[ProductSpecs], Optional[int], str]] = []
+        for cand, sp, price_val, display_price in priced:
+            assert price_val is not None
+            if min_price is not None and price_val < min_price:
+                continue
+            if max_price is not None and price_val > max_price:
+                continue
+            filtered.append((cand, sp, price_val, display_price))
+        if not filtered:
+            return (
+                "I couldn't find any iPhones in that price range in the current "
+                "catalog. You can still browse all our iPhones here: "
+                "https://grest.in/collections/iphones"
+            )
+        filtered.sort(key=lambda it: it[2] or 0, reverse=True)
+        chosen = filtered[:3]
+        header = "Here are iPhones we currently have in that price range:"
+    elif most_expensive_only and priced:
+        priced.sort(key=lambda it: it[2] or 0, reverse=True)
+        chosen = priced[:1]
+        header = "Here is the most expensive iPhone we currently have:"
+    elif cheapest_only and priced:
+        priced.sort(key=lambda it: it[2] or 0)
+        chosen = priced[:1]
+        header = "Here is the cheapest iPhone we currently have:"
+    else:
+        if not priced:
+            # Without any numeric prices, avoid pretending we know which ones
+            # are most/least expensive.
+            return None
+        priced.sort(key=lambda it: it[2] or 0, reverse=True)
+        if len(priced) >= 3:
+            top = priced[0]
+            mid = priced[len(priced) // 2]
+            low = priced[-1]
+            seen: set[str] = set()
+            chosen_list: List[tuple[ProductCandidate, Optional[ProductSpecs], Optional[int], str]] = []
+            for it in (top, mid, low):
+                cid = getattr(it[0], "id", "")
+                if cid and cid not in seen:
+                    chosen_list.append(it)
+                    seen.add(cid)
+            if len(chosen_list) < 3:
+                for extra in priced:
+                    cid = getattr(extra[0], "id", "")
+                    if cid and cid in seen:
+                        continue
+                    chosen_list.append(extra)
+                    seen.add(cid)
+                    if len(chosen_list) >= 3:
+                        break
+            chosen = chosen_list
+            header = (
+                "We have several iPhones available. For example, here are three "
+                "options from the catalog:"
+            )
+        else:
+            chosen = priced
+            header = "We have these iPhones in the current catalog:"
+
+    lines: List[str] = []
+    requested_label = _extract_requested_iphone_label(query)
+    if requested_label and min_price is None and max_price is None:
+        lines.append(
+            f"I couldn't find {requested_label} in our current catalog. "
+            "But here are some iPhones we do have:"
+        )
+        lines.append("")
+
+    lines.append(header)
+    for cand, sp, price_val, display_price in chosen:
+        name = (getattr(cand, "name", "") or "iPhone").strip()
+        url = (getattr(cand, "url", "") or "").strip()
+        suffix = f" - {display_price}" if display_price else ""
+        if url:
+            lines.append(f"- [{name}]({url}){suffix}")
+        else:
+            lines.append(f"- {name}{suffix}")
+
+    lines.append(
+        "You can see all our iPhones here: https://grest.in/collections/iphones"
+    )
+    return "\n".join(lines)
+
+
 def answer_query(
     query: str,
     top_k: int = 6,
@@ -1306,25 +1604,35 @@ def answer_query(
         except Exception:
             product_plan = None
 
-        # If there is no concrete catalog match, treat this as an ambiguous
-        # product-like question (for example, generic buying advice) and let a
-        # small classifier decide whether it is really about specs or not.
+        # If there is no concrete catalog match, treat most queries as
+        # ambiguous product-like questions and let a small classifier decide
+        # whether they are really about specs or something else. However, for
+        # clear family-style iPhone queries (for example, "what all iPhones you
+        # have"), we keep this in the product_specs domain so that deterministic
+        # catalog fallback can list available iPhones.
         no_catalog_match = (
             product_match is None
             or not getattr(product_match, "candidates", None)
             or getattr(product_match, "match_type", "NONE") == "NONE"
         )
         if no_catalog_match:
-            try:
-                domain_tag = _classify_product_domain(query)
-            except Exception:
+            fam = _detect_family_from_query(query)
+            if fam == "iphone":
+                # Stay in product_specs so downstream logic can build a
+                # catalog-backed family answer instead of downgrading intent.
                 domain_tag = "product_specs"
-            # When the domain is not specs, treat this as a non-product query so
-            # we do not run product specs loaders or product-style prompting.
-            if domain_tag != "product_specs":
-                intent = "general"
-                product_match = None
-                product_plan = None
+            else:
+                try:
+                    domain_tag = _classify_product_domain(query)
+                except Exception:
+                    domain_tag = "product_specs"
+                # When the domain is not specs, treat this as a non-product
+                # query so we do not run product specs loaders or
+                # product-style prompting.
+                if domain_tag != "product_specs":
+                    intent = "general"
+                    product_match = None
+                    product_plan = None
 
     # Detect whether this is a comparison-style query (e.g. "X vs Y"). This is
     # used both to optionally add external web comparison context and to shape
@@ -1508,7 +1816,19 @@ def answer_query(
         # Restore allowlist regardless of errors
         os.environ["RETRIEVE_SOURCE_ALLOWLIST"] = original_allow
     if not items:
-        # Best-effort: no retrieval, return empty with hint handled by caller
+        # Best-effort: for iPhone family product queries, fall back to the
+        # deterministic family listing instead of a generic not-found.
+        if effective_intent == "product":
+            fam_for_family = _detect_family_from_query(query)
+            no_catalog_for_family = (
+                product_match is None
+                or not getattr(product_match, "candidates", None)
+                or getattr(product_match, "match_type", "NONE") == "NONE"
+            )
+            if fam_for_family == "iphone" and no_catalog_for_family:
+                family_answer = _build_iphone_family_answer(query)
+                if family_answer:
+                    return family_answer, []
         return "Not found in sources provided.", []
 
     # Optional external web comparison augmentation for comparison-style queries.
@@ -1709,6 +2029,21 @@ def answer_query(
             ctx_has_charges = any(tok in ctx_join for tok in ["charge", "charges", "fee", "fees", "cost", "costs", "₹", "rs ", "rs."])
             if not ctx_has_charges:
                 out_text = _build_fallback_text()
+
+    # For product intents where the catalog cannot find a specific model but
+    # the query is clearly about iPhones, build a deterministic family/price
+    # answer instead of a generic product fallback.
+    if effective_intent == "product":
+        fam_for_family = _detect_family_from_query(query)
+        no_catalog_for_family = (
+            product_match is None
+            or not getattr(product_match, "candidates", None)
+            or getattr(product_match, "match_type", "NONE") == "NONE"
+        )
+        if fam_for_family == "iphone" and no_catalog_for_family:
+            family_answer = _build_iphone_family_answer(query)
+            if family_answer:
+                out_text = family_answer
 
     # Deterministic sibling variants section for product intents so the
     # base-model flow always lists alternatives.
