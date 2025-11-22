@@ -10,6 +10,7 @@ import psycopg
 from .log import get_logger
 from .step2_embed import OpenAIEmbedder
 from .step2_write import get_conn
+from .cache import get_json, set_json, make_key, normalize_text
 
 logger = get_logger("racen.retrieve")
 
@@ -25,6 +26,42 @@ class RetrievedChunk:
     score: float
     score_vector: float
     score_lexical: float
+
+
+def _chunks_to_json(items: List[RetrievedChunk]) -> List[dict]:
+    return [
+        {
+            "chunk_id": x.chunk_id,
+            "document_id": x.document_id,
+            "source": x.source,
+            "text": x.text,
+            "start_line": x.start_line,
+            "end_line": x.end_line,
+            "score": x.score,
+            "score_vector": x.score_vector,
+            "score_lexical": x.score_lexical,
+        }
+        for x in items
+    ]
+
+
+def _chunks_from_json(objs: List[dict]) -> List[RetrievedChunk]:
+    out: List[RetrievedChunk] = []
+    for r in objs or []:
+        out.append(
+            RetrievedChunk(
+                chunk_id=r.get("chunk_id", ""),
+                document_id=r.get("document_id", ""),
+                source=r.get("source", ""),
+                text=r.get("text", ""),
+                start_line=int(r.get("start_line", 0) or 0),
+                end_line=int(r.get("end_line", 0) or 0),
+                score=float(r.get("score", 0.0) or 0.0),
+                score_vector=float(r.get("score_vector", 0.0) or 0.0),
+                score_lexical=float(r.get("score_lexical", 0.0) or 0.0),
+            )
+        )
+    return out
 
 
 def _normalize(scores: List[float]) -> List[float]:
@@ -213,6 +250,34 @@ def search_hybrid(
 def retrieve(query_text: str, top_k: int = 5) -> List[RetrievedChunk]:
     """High-level API: embed query, run hybrid search, return results."""
     embedder = OpenAIEmbedder()
+
+    allow_env = os.getenv("RETRIEVE_SOURCE_ALLOWLIST", "").strip()
+    fast_mode_env = os.getenv("FAST_MODE", "0")
+    rerank_top_n_env = os.getenv("RERANK_TOP_N", "12")
+    backoff_enabled_env = os.getenv("RETRIEVE_BACKOFF_ENABLE", "0")
+    backoff_threshold_env = os.getenv("RETRIEVE_BACKOFF_THRESHOLD", "0.35")
+    secondary_env = os.getenv("RETRIEVE_BACKOFF_SECONDARY", "").strip()
+
+    key = make_key(
+        {
+            "k": "retrieval",
+            "q": normalize_text(query_text),
+            "allow": allow_env,
+            "top_k": int(top_k),
+            "fast": fast_mode_env,
+            "rerank": rerank_top_n_env,
+            "backoff": backoff_enabled_env,
+            "backthr": backoff_threshold_env,
+            "secondary": secondary_env,
+            "model": embedder.model,
+            "ver": "v1",
+        }
+    )
+    cached = get_json(key)
+    if cached:
+        items_cached = _chunks_from_json(cached)
+        return items_cached[:top_k]
+
     conn = get_conn()
     try:
         fast_mode = os.getenv("FAST_MODE", "0") in {"1", "true", "TRUE", "yes"}
@@ -304,7 +369,16 @@ def retrieve(query_text: str, top_k: int = 5) -> List[RetrievedChunk]:
             except Exception:
                 pass
 
-        return items[:top_k]
+        final_items = items[:top_k]
+        try:
+            ttl = int(os.getenv("RACEN_RETRIEVAL_CACHE_TTL_S", "21600"))
+        except Exception:
+            ttl = 21600
+        try:
+            set_json(key, _chunks_to_json(final_items), ttl)
+        except Exception:
+            pass
+        return final_items
     finally:
         conn.close()
 

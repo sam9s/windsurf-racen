@@ -323,6 +323,7 @@ except Exception:
     pass
 
 from racen.log import get_logger
+from racen.cache import get_json as cache_get_json, set_json as cache_set_json, make_key as cache_make_key, normalize_text as cache_normalize
 from racen.step2_write import DBConfig, get_conn
 from racen.step3_retrieve import retrieve, RetrievedChunk
 from racen.product_search import (
@@ -1046,6 +1047,34 @@ def _clean_snippet(text: str) -> str:
         t = t[:300].rstrip() + " …"
     return t
 
+
+def _build_static_noanswer_message(query: str, previous_user: str) -> str:
+    """Build a static fallback message when no exact answer is available.
+
+    Args:
+        query (str): Current user message.
+        previous_user (str): Previous user message in the thread, if any.
+
+    Returns:
+        str: Static fallback text asking the user to rephrase their question.
+    """
+
+    text_for_mode = previous_user or query or ""
+    mode = _detect_mode(text_for_mode)
+    emoji = " 🙂"
+    if mode == "HI_EN":
+        return (
+            "Main aapke question ko theek se samajh nahi paayi, "
+            "kya aap fir se likh sakte ho ki aap kya chahte ho?"
+            f"{emoji}"
+        )
+    return (
+        "I apologize, I couldn't find an exact answer to your query, "
+        "can you please rephrase your question and try again?"
+        f"{emoji}"
+    )
+
+
 def _strip_inline_citations(text: str) -> str:
     t = text or ""
     # remove inline numeric citation markers like [1], [12]
@@ -1053,6 +1082,7 @@ def _strip_inline_citations(text: str) -> str:
     # remove trivial 'Citations' header lines the model might add
     t = re.sub(r"\n+\s*Citations\s*:\s*\n?", "\n", t, flags=re.IGNORECASE)
     return t.strip()
+
 
 def _followups_for_intent(intent: str) -> List[str]:
     if intent == "returns":
@@ -1232,11 +1262,7 @@ def _classify_comparison_intent_llm(query: str) -> bool:
     )
 
     try:
-        label_raw = _call_openai(
-            prompt,
-            max_retries=2,
-            model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
-        )
+        label_raw = _call_openai(prompt)
     except Exception:
         return False
 
@@ -1263,7 +1289,7 @@ def _classify_product_domain(query: str) -> str:
         return "generic_support"
 
     ql = q.lower()
-    if "best time to buy" in ql or "best time of year to buy" in ql:
+    if "best time to buy" in ql:
         return "buying_advice"
 
     # If no API key is configured, fall back to treating this as a specs-style
@@ -1338,7 +1364,7 @@ def _parse_price_filter(query: str) -> tuple[Optional[int], Optional[int], bool,
 
     q = (query or "").lower()
     if not q:
-        return None, None, False
+        return None, None, False, False
 
     q_norm = q.replace(",", "")
     nums: List[int] = []
@@ -1398,8 +1424,12 @@ def _extract_requested_iphone_label(query: str) -> Optional[str]:
 
     if not query:
         return None
+    # Only treat clearly model-like tokens as labels, for example
+    # "iPhone 11", "iPhone 13 Pro", "iPhone XR", "iPhone XS", "iPhone SE".
+    # This avoids picking up partial words like "iPhone avai" from
+    # "available" in broad family/price queries.
     m = re.search(
-        r"(iphone\s+[0-9a-z]{1,4}(?:\s+(?:pro|max|mini|plus))?)",
+        r"(iphone\s+(?:\d{1,2}|x(?:r|s)?|se)(?:\s+(?:pro|max|mini|plus))?)",
         query,
         flags=re.IGNORECASE,
     )
@@ -1534,14 +1564,6 @@ def _build_iphone_family_answer(query: str) -> Optional[str]:
             header = "We have these iPhones in the current catalog:"
 
     lines: List[str] = []
-    requested_label = _extract_requested_iphone_label(query)
-    if requested_label and min_price is None and max_price is None:
-        lines.append(
-            f"I couldn't find {requested_label} in our current catalog. "
-            "But here are some iPhones we do have:"
-        )
-        lines.append("")
-
     lines.append(header)
     for cand, sp, price_val, display_price in chosen:
         name = (getattr(cand, "name", "") or "iPhone").strip()
@@ -1568,6 +1590,9 @@ def answer_query(
     intent, last_intent = _classify_intent(query, previous_answer)
     domain_tag = ""
 
+    # Domain will be determined later via classifier where needed; avoid
+    # brittle phrase-specific overrides.
+
     # For general/order-buy queries that mention Grest or explicit review sites,
     # run the small domain classifier so we can detect brand_reputation even when
     # there is no concrete product catalog match. This keeps the decision
@@ -1581,6 +1606,23 @@ def answer_query(
             domain_tag = _classify_product_domain(query)
         except Exception:
             domain_tag = ""
+
+    # For general/order-buy queries that clearly reference configured product
+    # families (via PRODUCT_FAMILIES keywords), run the small domain classifier
+    # to detect buying_advice in a model-driven way (no phrase hardcoding).
+    if intent in {"general", "order_buy"}:
+        try:
+            ents = {kw for fam in PRODUCT_FAMILIES.values() for kw in fam}
+        except Exception:
+            ents = {"iphone", "ipad", "macbook", "laptop", "phone"}
+        ql_any = (query or "").lower()
+        if any(e in ql_any for e in ents):
+            try:
+                dom2 = _classify_product_domain(query)
+            except Exception:
+                dom2 = ""
+            if dom2 == "buying_advice":
+                domain_tag = "buying_advice"
 
     # For product intents, run catalog-aware product_search (currently iPhone-only)
     # to understand whether the requested model is an exact match, a close
@@ -1618,9 +1660,54 @@ def answer_query(
         if no_catalog_match:
             fam = _detect_family_from_query(query)
             if fam == "iphone":
-                # Stay in product_specs so downstream logic can build a
-                # catalog-backed family answer instead of downgrading intent.
-                domain_tag = "product_specs"
+                # For clear family/price-style iPhone queries (broad browse,
+                # under/between ranges, cheapest/most expensive), short-circuit
+                # directly to the deterministic catalog-backed family answer so
+                # we do not depend on retrieval/LLM fallbacks.
+                try:
+                    min_p, max_p, most_exp_only, cheapest_only = _parse_price_filter(query)
+                except Exception:
+                    min_p, max_p, most_exp_only, cheapest_only = None, None, False, False
+                ql_family = (query or "").lower()
+                is_family_browse = any(
+                    phrase in ql_family
+                    for phrase in [
+                        "what all iphones",
+                        "what all iphone",
+                        "all iphones you have",
+                        "all iphone you have",
+                        "what iphones you have",
+                        "which iphones you have",
+                    ]
+                )
+                # Decide domain via classifier to avoid hardcoding phrases.
+                # If classifier says buying_advice, route to blogs/news and
+                # skip family/specs fallback. Otherwise keep product_specs.
+                try:
+                    _dom = _classify_product_domain(query)
+                except Exception:
+                    _dom = "product_specs"
+                if _dom == "buying_advice":
+                    domain_tag = "buying_advice"
+                    intent = "general"
+                    product_match = None
+                    product_plan = None
+                
+                if (
+                    most_exp_only
+                    or cheapest_only
+                    or min_p is not None
+                    or max_p is not None
+                    or is_family_browse
+                ):
+                    family_answer_sc = _build_iphone_family_answer(query)
+                    if family_answer_sc:
+                        return family_answer_sc, []
+
+                # Stay in product_specs when not buying_advice so downstream
+                # logic can build a catalog-backed family answer.
+                if domain_tag != "buying_advice":
+                    domain_tag = "product_specs"
             else:
                 try:
                     domain_tag = _classify_product_domain(query)
@@ -1744,6 +1831,43 @@ def answer_query(
     if ack and intent == "general" and last_intent != "general":
         effective_intent = last_intent
 
+    # Answer cache: try to serve from cache for safe flows (no unclear, no comparison)
+    try:
+        cache_allowed = os.getenv("RACEN_CACHE_ENABLED", "1") in {"1", "true", "TRUE", "yes"}
+        if cache_allowed and not _is_comparison_query(query) and intent != "unclear":
+            cache_key = cache_make_key(
+                {
+                    "k": "answer",
+                    "q": cache_normalize(query),
+                    "intent": effective_intent,
+                    "domain": (domain_tag or ""),
+                    "top_k": int(top_k),
+                    "allow": os.getenv("RETRIEVE_SOURCE_ALLOWLIST", ""),
+                    "followups": os.getenv("ANSWER_FOLLOWUPS_ENABLE", "0"),
+                    "tone": os.getenv("ANSWER_TONE_AWARE", "0"),
+                    "web": os.getenv("ENABLE_WEB_COMPARISON", "0"),
+                    "ver": "v1",
+                }
+            )
+            cached = cache_get_json(cache_key)
+            if isinstance(cached, dict) and (cached.get("answer")):
+                cits_raw = cached.get("citations") or []
+                cits: List[Citation] = []
+                for r in cits_raw:
+                    try:
+                        cits.append(
+                            Citation(
+                                url=(r.get("url", "") or ""),
+                                start_line=int(r.get("start_line", 1) or 1),
+                                end_line=int(r.get("end_line", 1) or 1),
+                            )
+                        )
+                    except Exception:
+                        continue
+                return str(cached.get("answer") or ""), cits
+    except Exception:
+        pass
+
     # For product follow-ups, keep retrieval biased toward the same product family
     # mentioned in the previous answer using configured domain nouns instead of
     # hardcoded SKUs.
@@ -1829,7 +1953,8 @@ def answer_query(
                 family_answer = _build_iphone_family_answer(query)
                 if family_answer:
                     return family_answer, []
-        return "Not found in sources provided.", []
+        static_msg = _build_static_noanswer_message(query, previous_user)
+        return static_msg, []
 
     # Optional external web comparison augmentation for comparison-style queries.
     # This uses SerpAPI DuckDuckGo via racen.web_comparison.search_comparison and
@@ -2019,16 +2144,18 @@ def answer_query(
         out_text = _strip_followup_tail(out_text)
     low = out_text.strip().lower()
     if fallback_on and (low.startswith("not found in sources provided")):
-        out_text = _build_fallback_text()
+        static_msg = _build_static_noanswer_message(query, previous_user)
+        return static_msg, []
     # If user explicitly asked for shipping charges but none of the retrieved texts contain charge-like tokens,
-    # use the graceful fallback even if the model produced a generic shipping answer.
+    # use the static fallback even if the model produced a generic shipping answer.
     if fallback_on and effective_intent == "shipping":
         q_has_charges = any(tok in ql for tok in ["charge", "charges", "fee", "fees", "cost", "costs", "pricing", "price"])
         if q_has_charges:
             ctx_join = " ".join((it.text or "") for it in items[:6]).lower()
-            ctx_has_charges = any(tok in ctx_join for tok in ["charge", "charges", "fee", "fees", "cost", "costs", "₹", "rs ", "rs."])
+            ctx_has_charges = any(tok in ctx_join for tok in ["charge", "charges", "fee", "fees", "cost", "costs", "aa", "rs ", "rs."])
             if not ctx_has_charges:
-                out_text = _build_fallback_text()
+                static_msg = _build_static_noanswer_message(query, previous_user)
+                return static_msg, []
 
     # For product intents where the catalog cannot find a specific model but
     # the query is clearly about iPhones, build a deterministic family/price
@@ -2258,6 +2385,55 @@ def answer_query(
         f"ack={int(ack)} | more_details={int(more_details)} | top_score={top_score:.2f} | "
         f"fallback={int(fallback_used)} | lang_target={target_mode} | lang_out={current_mode} | tone={tone}"
     )
+
+    # Answer cache: store safe flows (exclude static rephrase fallbacks and comparisons)
+    try:
+        if (
+            os.getenv("RACEN_CACHE_ENABLED", "1") in {"1", "true", "TRUE", "yes"}
+            and not comparison_query
+            and intent != "unclear"
+        ):
+            low_out = (out_text or "").lower()
+            is_static_noanswer = (
+                "rephrase your question" in low_out
+                or "samajh nahi" in low_out
+                or "fir se likh sakte" in low_out
+                or low_out.startswith("i’m not fully sure what you mean.")
+                or low_out.startswith("i'm not fully sure what you mean.")
+            )
+            if not is_static_noanswer:
+                try:
+                    ttl = int(os.getenv("RACEN_ANSWER_CACHE_TTL_S", "7200"))
+                except Exception:
+                    ttl = 7200
+                payload = {
+                    "answer": out_text,
+                    "citations": [
+                        {"url": c.url, "start_line": c.start_line, "end_line": c.end_line}
+                        for c in citations
+                    ],
+                }
+                # Recompute the same key as above; if it wasn't created (exception), create it now
+                try:
+                    cache_key
+                except NameError:
+                    cache_key = cache_make_key(
+                        {
+                            "k": "answer",
+                            "q": cache_normalize(query),
+                            "intent": effective_intent,
+                            "domain": (domain_tag or ""),
+                            "top_k": int(top_k),
+                            "allow": os.getenv("RETRIEVE_SOURCE_ALLOWLIST", ""),
+                            "followups": os.getenv("ANSWER_FOLLOWUPS_ENABLE", "0"),
+                            "tone": os.getenv("ANSWER_TONE_AWARE", "0"),
+                            "web": os.getenv("ENABLE_WEB_COMPARISON", "0"),
+                            "ver": "v1",
+                        }
+                    )
+                cache_set_json(cache_key, payload, ttl)
+    except Exception:
+        pass
 
     return out_text, citations
 

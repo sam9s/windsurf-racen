@@ -125,7 +125,8 @@ Partially Done
 5) Intent‑driven Internet search (guardrailed)
    - RACEN decides to search externally only on specific intents (comparison/reputation/news) and only after on‑site retrieval is low‑confidence.
    - Use domain allowlist/denylist, strict token/time caps, cache results, and clear External citations.
-   - Evaluate `ottomator-agents-main/pydantic-ai-advanced-researcher` as a web‑research subagent with our adapter; alternatives possible if simpler.
+   - Provider: DuckDuckGo via SerpAPI (already integrated in code).
+   - Current status: CLI web access works; Slack path is parked (disabled by gating) and will be re‑enabled with comparison intent wiring.
 
 ## Explicit Decisions
 - Embeddings: OpenAI `text-embedding-3-small` (1536-d); DB vector(1536); disable local 256-d providers.
@@ -300,22 +301,19 @@ These phase definitions keep the current Slack + Answer API MVP on track while e
 
 ### Updated Next Actions (Phase 1 – next 4–5 days)
 
-1) **Trustpilot / Brand Reputation (Phase 1.1)**
-   - Ingest the Grest Trustpilot profile into Postgres/pgvector as an External source.
-   - Extend domain routing so `brand_reputation` queries (e.g., "why should I buy from Grest?", "are you trustworthy?", "what is your rating?"):
-     - Prefer Trustpilot content + key on-site pages (e.g., about/why-Grest), with clear External labeling.
-   - Add tests to verify:
-     - Trustpilot URLs appear in citations for reputation queries.
-     - Answers summarize rating, review volume, and a small number of representative quotes.
+1) **Trustpilot / MouthShut (Phase 1.1 — URLs already injected)**
+   - Status: URLs present in `Grest_Data/grest_brand_reviews.yaml` and used by brand‑reputation routing; citations verified in tests.
+   - Actions: ensure indexing is up‑to‑date; keep External labeling clear; add/maintain tests for citations and summaries.
 
-2) **Guardrailed Web Comparison via Advanced Web Researcher (Phase 1.2)**
-   - Integrate the advanced web researcher from `ottomator-agents-main/advanced-web-researcher` (Brave search API) as a narrow, internal web-search tool.
+2) **Guardrailed Web Comparison via DuckDuckGo (SerpAPI) (Phase 1.2)**
+   - Use SerpAPI DuckDuckGo engine as the narrow, internal web‑search tool (already wired in `src/racen/web_comparison.py`).
    - Only RACEN decides when to call web search, based on semantic patterns such as:
      - "difference between iphone 14 and iphone 17"
      - "iphone 14 vs iphone 15 which is better"
    - Guardrails:
      - Users cannot directly command a web search; the backend chooses to use it only for specific comparison/reputation-style intents.
      - Answers clearly label web-sourced content as External and include citations.
+   - Status: CLI web access is working; Slack path parked (disabled by gating) — enable after comparison intent wiring.
    - Add tests with the web client mocked to ensure:
      - Comparison intents trigger a single web-search call.
      - Answers mention both models and surface the stubbed External URLs as citations.
@@ -327,3 +325,68 @@ These phase definitions keep the current Slack + Answer API MVP on track while e
    - Plan how to embed this UI into the Grest website (e.g., dedicated page or embedded widget) for the Phase 1 demo.
    - Smoke tests:
      - Verify the Web UI can run the same core flows as Slack (product Q&A, policy questions, Trustpilot reputation, and one comparison query).
+
+4) **RACEN Mobile PWA → TWA (Phase 1.4)**
+   - After the Web UI is stable, expose it as a PWA and package into an Android TWA for installability and distribution.
+   - Scope: install prompt, basic offline shell, WebView TWA wrapper, and linking back to grest.in.
+
+## Update – 2025-11-22 (iPhone Family Price Flows + Slack UX)
+
+### Completed Since Last Update
+- **Deterministic iPhone family price/browse helper**
+  - Implemented a catalog-backed `_build_iphone_family_answer` helper in `scripts/step4_answer.py` using iPhone product candidates and structured specs (via Postgres + `extract_product_specs`).
+  - Handles:
+    - "Cheapest iPhone available" queries.
+    - "Most expensive iPhone available" queries.
+    - Price-ceiling and between-range queries (e.g., under 50,000; between 20,000 and 50,000 rupees).
+    - Broad browse-style queries such as "what all iPhones you have".
+  - Selection is fully deterministic (no LLM in the core path): products are chosen from the catalog, filtered by numeric prices, sorted, and rendered via a small fixed markdown template (header + bullets + iPhone collection link).
+- **iPhone family price tests**
+  - Added `tests/test_iphone_family_price_flows.py` to cover:
+    - Cheapest and most-expensive iPhone flows.
+    - Under-50k and between-20k–50k price ranges.
+    - The generic iPhone family browse query.
+  - Tests assert that answers contain markdown bullet links for products and the canonical collection URL `https://grest.in/collections/iphones`.
+- **Slack product-link cleanup for family flows**
+  - Updated `slack-openai-bot/app.js` so product-intent answers:
+    - Still add a standalone product-page link for single-product answers (to enable Slack unfurl).
+    - **Skip** appending the extra generic "Product page" link when the answer already contains multiple `grest.in/products/...` bullets or the iPhone collection URL. This avoids confusing, redundant links at the end of iPhone family price-range listings.
+
+### Design Notes / Future Evolution (price flows + transactional pattern)
+- The iPhone family price flows intentionally follow the same design pattern we want for future high-impact transactional features:
+  - Use LLMs for **interpretation and phrasing**, not for deciding prices or performing side-effects.
+  - Keep **business logic deterministic and testable** (for example, "given catalog + price range, which SKUs to show"), implemented in Python and covered by pytest + CLI checks.
+- Current price/intention detection is narrowly English-triggered (e.g., "cheapest", "most expensive", "under", "between"). To keep behavior consistent across English and Hinglish in the future:
+  - Either extend the detector with Hinglish phrases (e.g., "sabse sasta", "sabse mehenga", "20 hazaar se kam", "20 se 40 hazaar ke beech"), or
+  - Introduce a small NLU/LLM classifier that tags queries as "cheapest / most-expensive / range" independent of surface language, and then feeds into the same deterministic catalog logic.
+- For future product families and a DB-aware `product_search` abstraction:
+  - Keep the family/price selection logic behind a stable function boundary so it can be reused for other families (MacBooks, iPads, etc.) and transactional flows (for example, "pick the cheapest in-stock variant") without changing the Slack bot or the `/answer` API contract.
+
+## Planned – Caching Optimization (deferred until after Web UI wiring)
+
+We will implement caching improvements after the minimal Web UI is wired, so we optimize where real users will feel it most.
+
+- Target (hot run): at least 49/51 queries under 5s; at most 2 between 5–7s.
+- Reference benchmark (2025‑11‑22): 27/51 <5s, 9/51 5–7s, 15/51 >7s; overall speedup x1.74 (report: tests/queries/grest_cache_benchmark_results.md).
+
+Planned actions
+- Final‑answer TTL cache for safe flows
+  - Cache product and brand‑reputation answers (TTL 2–12h), exclude unclear intent.
+  - Cache comparison answers (TTL 12–24h) to avoid repeated web work; clear External labeling remains.
+- Precompute family/price answers
+  - Pre‑generate and Redis‑cache iPhone family price/browse responses (cheapest/most‑expensive/under/between/all) for sub‑second hot responses.
+- Retrieval/answer keying + hit‑rate instrumentation
+  - Keep keys: normalized query text + intent + domain + top_k + allowlist + web/followups/tone flags + version salt.
+  - Add simple hit/miss counters and per‑domain breakdown.
+- DB and specs performance
+  - Add Postgres connection pooling (psycopg_pool) and Redis cache for product specs‑by‑URL to reduce repeated DB reads.
+- Reduce work where we must compute
+  - Tune `ANSWER_CHUNK_CHAR_BUDGET` (e.g., 800) and domain `top_k` (policy/support ≤5; brand ≤5; product ~6).
+  - Prefer the fastest safe model for non‑creative replies.
+- Prewarm critical queries
+  - Warm the 51 curated queries on deploy and nightly to keep the cache hot.
+
+Expected impact (hot run)
+- Family/price and policy/support: ~ms to <1s.
+- Comparisons: <1s with final‑answer TTL + web subcache.
+- Product availability/specs: 2–4s with pooling/specs‑cache; <1s once answer is cached.

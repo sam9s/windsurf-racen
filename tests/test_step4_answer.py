@@ -1,5 +1,3 @@
-import types
-
 import pytest
 
 from scripts import step4_answer as sa
@@ -98,7 +96,11 @@ def test_product_fallback_does_not_leak_noisy_catalog_snippets(monkeypatch: pyte
     assert "vitamin" not in low
     assert "sour apple" not in low
     # And we should instead see a graceful clarification
-    assert "exact match" in low or "exact model" in low
+    assert (
+        "rephrase your question" in low
+        or "samajh nahi" in low
+        or "fir se likh sakte" in low
+    )
 
 
 def test_category_query_uses_product_family_from_config(monkeypatch: pytest.MonkeyPatch) -> None:
