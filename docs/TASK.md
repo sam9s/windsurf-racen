@@ -20,7 +20,7 @@
 - [ ] Add mocked tests to verify single web-search call and External citations in answers. (ID: web-compare-tests)
 
 ### Web UI
-- [ ] Build a minimal RACEN Web UI (single chat box using the /answer API) and plan how to embed it on the GREST website for the Phase 1 demo. (ID: answer-racen-web-ui-phase1)
+- [x] Build a minimal RACEN Web UI (single chat box using the /answer API) and plan how to embed it on the GREST website for the Phase 1 demo. (ID: answer-racen-web-ui-phase1)
 
 ### Mobile (PWA → TWA)
 - [ ] Convert Web UI to PWA (manifest, icons, basic offline shell). (ID: mobile-pwa)

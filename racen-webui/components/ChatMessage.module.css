@@ -1,0 +1,57 @@
+.wrapper {
+  width: var(--shell-width);
+  margin: 0.1rem auto;
+  display: flex;
+}
+
+.assistant {
+  justify-content: flex-start;
+}
+
+.user {
+  justify-content: flex-end;
+  margin-left: -20px;        /* keeps the bubble away from the scrollbar */
+}
+
+.bubble {
+  border-radius: 20px;
+  padding: 0.3rem 0.9rem;
+  background: rgba(15, 23, 42, 0.85);
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  max-width: min(calc(var(--shell-width) - 30px), 490px);
+  box-shadow: 0 16px 32px rgba(8, 13, 25, 0.38);
+}
+
+.assistant .bubble {
+  background: rgba(15, 23, 42, 0.92);
+}
+
+.user .bubble {
+  background: rgba(37, 99, 235, 0.16);
+  border-color: rgba(37, 99, 235, 0.28);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-align: bottom;
+}
+
+.text {
+  margin: 0 0 0.1rem;
+  white-space: pre-line;
+  line-height: 1.15;
+  color: rgba(226, 232, 240, 0.9);
+  font-size: 0.78rem;
+  word-break: break-word;
+  text-align: center;
+}
+
+
+.summary {
+  margin: 0 0 0.35rem;
+  white-space: pre-line;
+  line-height: 1.4;
+  color: rgba(226, 232, 240, 0.88);
+  font-size: 0.72rem;
+  font-weight: 400;
+  letter-spacing: 0.01rem;
+}

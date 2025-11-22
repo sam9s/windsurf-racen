@@ -1,0 +1,65 @@
+.sliderGroup {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  width: min(320px, 36%);
+  margin: 0.8rem auto 0;
+}
+
+.sliderLabel {
+  color: rgba(148, 163, 184, 0.7);
+  font-size: 0.65rem;
+  letter-spacing: 0.3rem;
+  text-transform: uppercase;
+}
+
+.sliderInput {
+  flex: 1;
+  appearance: none;
+  height: 2px;
+  background: rgba(148, 163, 184, 0.35);
+  border-radius: 999px;
+  outline: none;
+}
+
+.sliderInput::-webkit-slider-thumb {
+  appearance: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #38bdf8;
+  border: none;
+  box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.4);
+  cursor: pointer;
+}
+
+.sliderInput::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #38bdf8;
+  border: none;
+  box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.4);
+  cursor: pointer;
+}
+
+.sliderValue {
+  color: rgba(226, 232, 240, 0.85);
+  font-size: 0.75rem;
+  min-width: 2.4rem;
+  text-align: right;
+}
+
+.brandContext {
+  margin-top: 0.35rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.25rem 0.75rem;
+  border-radius: 999px;
+  background: rgba(56, 189, 248, 0.08);
+  color: rgba(191, 219, 254, 0.95);
+  font-size: 0.68rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
