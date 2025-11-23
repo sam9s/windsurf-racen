@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 from urllib.parse import urlparse
 
+from racen.assistant_meta import try_answer_meta_question
 
 def _read_text_file(path_str: str) -> str:
     try:
@@ -1586,6 +1587,13 @@ def answer_query(
     previous_answer: str = "",
     previous_user: str = "",
 ) -> tuple[str, List[Citation]]:
+    # Early deterministic handling for assistant meta questions
+    try:
+        meta = try_answer_meta_question(query)
+    except Exception:
+        meta = None
+    if meta:
+        return meta, []
     # Detect user intent for conversational follow-ups via classifier abstraction
     intent, last_intent = _classify_intent(query, previous_answer)
     domain_tag = ""
