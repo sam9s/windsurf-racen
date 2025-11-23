@@ -390,3 +390,30 @@ Expected impact (hot run)
 - Family/price and policy/support: ~ms to <1s.
 - Comparisons: <1s with final‑answer TTL + web subcache.
 - Product availability/specs: 2–4s with pooling/specs‑cache; <1s once answer is cached.
+
+## Update – 2025-11-23 (Shopify Mini Web UI, Sessions, Memori)
+
+### Decisions (concise)
+- Shopify embed plan
+  - Phase 1 (Demo): Script tag + CORS allow store domain; widget calls Answer API directly.
+  - Phase 2 (Prod): Shopify App Proxy (/apps/racen/answer), no CORS, signed requests.
+- Sessions
+  - Opaque tokens issued by `/session/bootstrap`; Redis stores session metadata (session_id → user_id, tenant, prefs, ttl).
+  - Authorization: `Bearer <opaque>` on each `/answer` call; backend attaches session context.
+- Memori (conversation memory)
+  - Integration mode: Explicit wrapper (not global interceptor).
+  - DB: Separate Postgres database (e.g., `racen_memori`) and user; scope rows by `tenant` (store domain) and `user_id`.
+  - conscious_ingest=True, auto_ingest=False; strict size limits on injected snippets; graceful DB‑down fallback.
+- Widget hosting
+  - GitHub Release + jsDelivr CDN for `racen-widget.js` (versioned, cacheable, reversible).
+
+### Plan (high‑level sequence)
+1) Preflight diagnostics (read‑only script): print effective env, ping Redis, connect Postgres; no writes.
+2) Scaffold `racen-webui-embed` (UMD); provide theme.liquid snippet and minimal config (apiBase, position, theme).
+3) Add `/session/bootstrap` (opaque tokens) and Redis middleware; flag‑gated (SESSION_ENABLE).
+4) Integrate Memori wrapper behind flags (MEMORI_ENABLE, MEMORI_DB_URL); inject ≤2 short snippets; store turns.
+5) Demo store test (Phase 1 CORS); then plan App Proxy wiring for production.
+
+### Immediate Next Actions
+- From PM: Provide demo store domain and confirm customer accounts enabled (for personalization).
+- From Dev (after approval): Implement preflight diagnostics script and share output, then proceed to widget bundle.

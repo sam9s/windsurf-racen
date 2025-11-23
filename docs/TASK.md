@@ -22,6 +22,18 @@
 ### Web UI
 - [x] Build a minimal RACEN Web UI (single chat box using the /answer API) and plan how to embed it on the GREST website for the Phase 1 demo. (ID: answer-racen-web-ui-phase1)
 
+### Shopify Mini Web UI (Embed)
+- [ ] Phase 1 (Demo): Script tag + CORS allow store domain; widget calls Answer API directly. Provide theme.liquid snippet and minimal config (apiBase, position, theme). (ID: shopify-embed-phase1)
+- [ ] Phase 2 (Prod): Shopify App Proxy (/apps/racen/answer); remove CORS, signed requests. (ID: shopify-app-proxy-prod)
+
+### Sessions & Memory
+- [ ] Session service: Opaque tokens via /session/bootstrap; store session metadata in Redis (session_id → user_id, tenant, prefs, ttl). Attach Authorization on /answer. (ID: session-opaque-redis)
+- [ ] Memori integration (explicit wrapper): fetch ≤2 short memory snippets per (tenant, user_id), inject into prompt, store turns in separate Postgres DB. Flags: MEMORI_ENABLE, MEMORI_DB_URL. (ID: memori-explicit-wrapper)
+
+### Diagnostics & Hosting
+- [ ] Preflight diagnostics script (read-only): print effective env, ping Redis, connect Postgres (no writes). (ID: preflight-diagnostics)
+- [ ] Host widget bundle via GitHub Release + jsDelivr; document versioned snippet. (ID: widget-hosting-jsdelivr)
+
 ### Mobile (PWA → TWA)
 - [ ] Convert Web UI to PWA (manifest, icons, basic offline shell). (ID: mobile-pwa)
 - [ ] Package PWA as Android Trusted Web Activity (TWA) and test installability. (ID: mobile-twa)
@@ -58,6 +70,8 @@
 - [x] Update unit tests to expect the static no-answer fallback wording for product queries. (ID: tests-fallback-static-message)
 - [x] Relax Mouthshut citation assertion to accept any valid Mouthshut Grest reviews URL. (ID: tests-brand-rep-mouthshut-assert)
 - [x] Run 51-query cache benchmark (cold + hot) and write results to tests/queries/grest_cache_benchmark_results.md; overall speedup x1.74 on 51 queries. (ID: cache-benchmark-51-queries)
+ - [x] Add deterministic assistant meta Q&A (identity/creator/location/capabilities/privacy/human/language) with early handling in answer flow. (ID: answer-assistant-meta)
+ - [x] Unit tests for assistant meta Q&A. (ID: tests-assistant-meta)
 ## Sample Flow - Finilized (example)
 - A. 
     Query for base model, e.g. “iphone 16”

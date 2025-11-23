@@ -108,9 +108,12 @@ def try_answer_meta_question(query: str) -> Optional[str]:
     # Identity
     if _match_any(ql, _META_PATTERNS["identity"]):
         return (
-            "I’m RACEN — Rapid Automation Customer Engagement Network. "
-            "I’m a GREST assistant. I help with products, "
-            "orders, policies, and brand reputation."
+            "I’m RACEN — Rapid Automation "
+            "Customer Engagement Network. "
+            "I’m a GREST assistant. "
+            "I help with products, "
+            "orders, policies, "
+            "and brand reputation."
         )
 
     # Creator
