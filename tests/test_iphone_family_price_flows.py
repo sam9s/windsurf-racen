@@ -26,6 +26,25 @@ def test_iphone_cheapest_family_fallback() -> None:
     assert "https://grest.in/collections/iphones" in answer
 
 
+@pytest.mark.parametrize(
+    "query",
+    [
+        "show me cheap iPhones",
+        "show me budget iPhones",
+        "show me inexpensive iPhones",
+        "show me cheepest iPhones",
+    ],
+)
+def test_iphone_cheap_synonyms_family_fallback(query: str) -> None:
+    """Cheap/budget synonyms should hit catalog-backed family answer."""
+
+    answer, _ = sa.answer_query(query, top_k=6)
+
+    assert answer
+    assert _has_bulleted_links(answer)
+    assert "https://grest.in/collections/iphones" in answer
+
+
 def test_iphone_most_expensive_family_fallback() -> None:
     """Query for the most expensive iPhone should use catalog-backed family answer.
 

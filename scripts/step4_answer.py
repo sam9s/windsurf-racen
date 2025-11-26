@@ -342,6 +342,7 @@ from racen.product_search import (
 )
 from racen.product_specs import ProductSpecs, extract_product_specs
 from racen.query_normalizer import normalize_query
+from racen.answer_output_rewriter import rewrite_answer_language
 from racen.web_comparison import search_comparison
 
 logger = get_logger("scripts.step4_answer")
@@ -848,6 +849,34 @@ def _compose_prompt(
     return "\n".join(lines)
 
 
+def _maybe_rewrite_output_lang(
+    raw_query: str,
+    answer: str,
+    user_mode: Optional[str] = None,
+) -> str:
+    """Apply the output language rewriter when enabled and appropriate.
+
+    This is a thin wrapper around `rewrite_answer_language` so that
+    deterministic answers (for example, iPhone family price flows or static
+    fallbacks) can be localized for Hinglish/Hindi users while leaving the
+    underlying logic and citations unchanged.
+
+    Args:
+        raw_query: Original user query text, before normalization.
+        answer: Final answer text for this branch.
+        user_mode: Optional detected user mode (for example, "EN", "HI_EN").
+
+    Returns:
+        str: Possibly rewritten answer text.
+    """
+
+    try:
+        result = rewrite_answer_language(answer=answer, user_query=raw_query, user_mode=user_mode)
+    except Exception:
+        return answer
+    return result.rewritten_answer or answer
+
+
 def _call_openai(prompt: str, max_retries: int = 3, model: str = "gpt-4o-mini") -> str:
     api_key = os.getenv("OPENAI_API_KEY")
     base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
@@ -943,6 +972,67 @@ def _detect_family_from_query(query: str) -> str:
             if kw in q:
                 return fam_name
     return ""
+
+
+def _extract_family_hints(text: str) -> set[str]:
+    """Extract product family hints present in the raw query text.
+
+    Args:
+        text (str): Raw user query text.
+
+    Returns:
+        set[str]: Set of family slugs like "iphone" that appear in the text.
+    """
+
+    q = (text or "").lower()
+    hints: set[str] = set()
+    for fam_name, kws in PRODUCT_FAMILIES.items():
+        for kw in kws:
+            if kw and kw in q:
+                hints.add(fam_name)
+                break
+    iphone_aliases = [
+        "iphne",
+        "iphon",
+        "ipone",
+        "i phone",
+        "i-phone",
+    ]
+    if any(alias in q for alias in iphone_aliases):
+        hints.add("iphone")
+    return hints
+
+
+def _preserve_family_hints(raw_query: str, normalized_query: str) -> str:
+    """Preserve detected product family hints when applying normalization.
+
+    Args:
+        raw_query (str): Original user query text.
+        normalized_query (str): Normalized query text returned by the LLM.
+
+    Returns:
+        str: Normalized text with any missing family hints re-attached.
+    """
+
+    base = (normalized_query or "").strip()
+    if not raw_query:
+        return base or normalized_query or ""
+    raw_hints = _extract_family_hints(raw_query)
+    if not raw_hints:
+        return base or normalized_query or ""
+    if not base:
+        base = normalized_query or ""
+    out = base or ""
+    low = out.lower()
+    for fam in sorted(raw_hints):
+        token = "iphone" if fam == "iphone" else fam
+        if token and token not in low:
+            if out:
+                out = f"{out} {token}"
+            else:
+                out = token
+            low = out.lower()
+    return out
 
 
 def _detect_intent(query: str) -> str:
@@ -1056,7 +1146,7 @@ def _clean_snippet(text: str) -> str:
     return t
 
 
-def _build_static_noanswer_message(query: str, previous_user: str) -> str:
+def _build_static_noanswer_message(query: str, previous_user: str = "") -> str:
     """Build a static fallback message when no exact answer is available.
 
     Args:
@@ -1610,6 +1700,23 @@ def answer_query(
     if meta:
         return meta, []
 
+    # Early guard for extremely noisy/short input before normalization so we
+    # do not waste LLM calls or run retrieval on queries like "???".
+    raw_lower = (raw_query or "").lower().strip()
+    has_alpha_raw = any(ch.isalpha() for ch in raw_lower)
+    noise_tokens = {"???", "????", "asdf", "qwerty"}
+    if (not raw_lower or not has_alpha_raw) or any(tok in raw_lower for tok in noise_tokens):
+        mode_for_unclear = _detect_mode(previous_user or raw_query)
+        if mode_for_unclear == "HI_EN":
+            msg_unclear = (
+                "Mujhe thoda clear nahi hua. Please thoda detail mein ya alag tareeke se bataoge?"
+            )
+        else:
+            msg_unclear = (
+                "Im not fully sure what you mean. Can you rephrase or add a bit more detail?"
+            )
+        return msg_unclear, []
+
     # LLM-based normalization for noisy queries (typos/Hinglish) before
     # intent/domain/price parsing. This never raises and falls back to the
     # original query on any error or when disabled.
@@ -1620,9 +1727,10 @@ def answer_query(
         locale_hint = None
     try:
         norm = normalize_query(raw_query, user_locale=locale_hint)
-        norm_q = (norm.normalized_query or raw_query).strip()
-        if norm_q:
-            query = norm_q
+        norm_q_raw = (norm.normalized_query or raw_query).strip()
+        if norm_q_raw:
+            norm_q = _preserve_family_hints(raw_query, norm_q_raw)
+            query = norm_q or norm_q_raw
     except Exception:
         query = raw_query
     # Detect user intent for conversational follow-ups via classifier abstraction
@@ -1741,6 +1849,10 @@ def answer_query(
                 ):
                     family_answer_sc = _build_iphone_family_answer(query)
                     if family_answer_sc:
+                        user_mode = _detect_mode(raw_query)
+                        family_answer_sc = _maybe_rewrite_output_lang(
+                            raw_query, family_answer_sc, user_mode=user_mode
+                        )
                         return family_answer_sc, []
 
                 # Stay in product_specs when not buying_advice so downstream
@@ -1867,7 +1979,7 @@ def answer_query(
             more_details = True
     # Effective intent for acknowledgements
     effective_intent = intent
-    if ack and intent == "general" and last_intent != "general":
+    if (ack or more_details) and intent == "general" and last_intent != "general":
         effective_intent = last_intent
 
     # Answer cache: try to serve from cache for safe flows (no unclear, no comparison)
@@ -1991,6 +2103,10 @@ def answer_query(
             if fam_for_family == "iphone" and no_catalog_for_family:
                 family_answer = _build_iphone_family_answer(query)
                 if family_answer:
+                    user_mode = _detect_mode(raw_query)
+                    family_answer = _maybe_rewrite_output_lang(
+                        raw_query, family_answer, user_mode=user_mode
+                    )
                     return family_answer, []
         static_msg = _build_static_noanswer_message(raw_query, previous_user)
         return static_msg, []
@@ -2209,7 +2325,10 @@ def answer_query(
         if fam_for_family == "iphone" and no_catalog_for_family:
             family_answer = _build_iphone_family_answer(query)
             if family_answer:
-                out_text = family_answer
+                user_mode = _detect_mode(raw_query)
+                out_text = _maybe_rewrite_output_lang(
+                    raw_query, family_answer, user_mode=user_mode
+                )
 
     # Deterministic sibling variants section for product intents so the
     # base-model flow always lists alternatives.

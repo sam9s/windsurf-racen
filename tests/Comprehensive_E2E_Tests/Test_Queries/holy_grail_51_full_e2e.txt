@@ -1,0 +1,67 @@
+# 51 curated queries covering product, price, browse, policy, order, brand reputation, and comparisons.
+# Format: <query text> || <top_k>
+
+# Product availability/specs (10)
+Do you have iPhone 11? || 10
+Do you have iPhone 12? || 10
+Do you have iPhone 13? || 10
+Do you have iPhone 14? || 10
+Do you have iPhone 15? || 10
+Do you have iPhone 14 Plus? || 10
+Do you have iPhone 13 Pro? || 10
+Do you have iPhone 12 mini? || 10
+Do you have iPhone 11 Pro? || 10
+How about MacBooks? || 10
+
+# Family price/browse (6+6)
+What's the cheapest iPhone available || 6
+What's the most expensive iPhone available || 6
+List me iPhones between 20000 and 50,000 || 6
+Show iPhones under 30000 || 6
+Show iPhones under 50000 || 6
+Show iPhones between 30000 and 60000 || 6
+
+# Family browse + negative (5)
+What all iPhones you have? || 6
+Which iPhones are available now? || 6
+Do you have any iPhone in stock? || 6
+List a few iPhones you have || 6
+Do you have iPhone 10? || 6
+
+# Policy/Support (6)
+What is your shipping policy? || 10
+What warranty do you offer? || 10
+How do I cancel or get a refund? || 10
+What is your returns policy? || 10
+What is your privacy policy? || 10
+What are your terms and conditions? || 10
+
+# Order/Contact (7)
+How do I place an order? || 10
+What payment options do you have? || 10
+Do you offer cash on delivery? || 10
+How do I track my order? || 10
+What are your support hours? || 10
+What is your contact number? || 10
+What is your customer support email? || 10
+
+# Brand reputation (8)
+Why should I buy from Grest? || 10
+What is the Trustpilot rating of Grest? || 10
+What do people say about Grest on Mouthshut? || 10
+Can I trust grest.in for refurbished phones? || 10
+How do you rate Grest? || 10
+Are Grest customers happy with their experience? || 10
+Grest rating || 10
+Is Grest trustworthy? || 10
+
+# Comparisons (9)
+Which is better iPhone 13 or iPhone 14? || 6
+iPhone 14 vs iPhone 15 which is better? || 6
+What is the difference between iPhone 14 and iPhone 15? || 6
+iPhone 12 vs iPhone 13 which should I buy? || 6
+iPhone 11 vs iPhone 12 which is better? || 6
+Grest vs Cashify which is better for refurbished iPhones? || 6
+Is iPhone 13 worth it over iPhone 12? || 6
+Should I buy iPhone 14 or wait for 15? || 6
+Which iPhone is better value right now? || 6

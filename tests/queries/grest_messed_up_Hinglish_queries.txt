@@ -1,0 +1,11 @@
+# Messed-up English queries to exercise the LLM-based normalizer.
+# Format: query||k (top_k); if k is omitted, default is 10.
+
+sabse sasta iphne kaon sa hai?
+eak sasts iphone batao?
+25000 ke ander konsa iphne hai? 
+20000 aur 40000 ke beech konsa iphne hai?
+aapka office kahan hai?
+phone order kerne ka kaya process hai?
+aapke phones ki battry kitni hai?
+aapke phone ka screen size kitna hai?

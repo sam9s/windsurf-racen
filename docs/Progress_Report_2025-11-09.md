@@ -417,3 +417,34 @@ Expected impact (hot run)
 ### Immediate Next Actions
 - From PM: Provide demo store domain and confirm customer accounts enabled (for personalization).
 - From Dev (after approval): Implement preflight diagnostics script and share output, then proceed to widget bundle.
+
+## Update – 2025-11-26 (Hinglish Output Rewriter + Product Normalization Plan)
+
+### Completed Since Last Update
+- **Hinglish-aware answer output rewriter**
+  - Added a dedicated `answer_output_rewriter` module and wired a thin wrapper in `scripts/step4_answer.py` so deterministic iPhone family answers (catalog-backed price/browse flows) can be post-processed into Hinglish when the user is in Hinglish mode.
+  - The rewriter is gated by env flags and keeps URLs, prices and product names intact while only changing surface language.
+  - Integrated with the existing iPhone family helper so flows like "cheapest iPhone" and "iPhones under 50,000" now produce stable Hinglish bullets without depending on the main LLM for wording.
+
+- **Hinglish 8-query harnesses (normalization + output)**
+  - Added `tests/queries/grest_messed_up_Hinglish_output_rewriter_report.py` and `tests/queries/grest_messed_up_Hinglish_queries.txt` to run a small set of noisy Hinglish queries end-to-end (DB + retrieval + LLM + rewriter) and write a Markdown report with per-query status, latencies, answers and citations.
+  - Added `tests/queries/grest_messed_up_Hinglish_normalizer_introspection_report.py` which logs, for the same queries, the original Hinglish text, the normalized English text from `normalize_query`, and the final `answer_query` output.
+  - First live runs show that:
+    - Pure iPhone price flows where the brand survives normalization behave as expected (deterministic iPhone listing in Hinglish).
+    - Some Hinglish queries normalize to generic "phones" (brand dropped) and therefore miss the current iPhone-only family/price logic, falling back to the static "please rephrase" message. This confirmed that the weak point is brand/family preservation and routing, not the core iPhone catalog helper.
+
+- **Dynamic product normalization roadmap (multi-brand, scalable)**
+  - Captured a design for dynamic, multi-brand product normalization and retrieval in `docs/Product_Normalization_Plan.md` (authored by Astra as a solution-architecture proposal).
+  - Key ideas (as a north-star for future phases):
+    - Canonical product identity + alias layer over the product catalog (brands, families, models, typo variants, abbreviations).
+    - Brand-aware routing and clarifiers for price-style queries (e.g., "cheapest iPhone" vs "cheapest Samsung" vs "cheapest overall phone").
+    - Confidence thresholds and analytics to learn new aliases from real traffic without hardcoding phrases.
+  - This document is **not** fully implemented yet but is aligned with the existing Phase 3 "product_search abstraction" direction and will guide how we extend beyond iPhones to Android, Samsung, Redmi, etc.
+
+For more details on the long-term normalization and multi-brand plan, see `docs/Product_Normalization_Plan.md`.
+
+### Next Steps (short-term, product normalization)
+- Add a small brand/family alias layer (starting with iPhone) around `normalize_query` so that family/brand tokens present in the original query are not lost or generalized away during normalization.
+  - Example: ensure queries containing misspellings like `iphne` or `iphon` are still treated as "iPhone" rather than generic "phone" so they route into the existing deterministic iPhone family price flows.
+- Re-run the Hinglish 8-query normalization and output-rewriter reports and adjust tests so that all clearly iPhone-specific Hinglish price queries hit the catalog-backed iPhone helper instead of the static no-answer fallback.
+- Keep the broader alias-based, multi-brand product_search design in Phase 3, implementing only the minimal family/brand-preservation slice now so it can be extended later when more product families and a dedicated product DB are introduced.

@@ -1,0 +1,8 @@
+# Messed-up English queries to exercise the LLM-based normalizer.
+# Format: query||k (top_k); if k is omitted, default is 10.
+
+whts the chipest iphone you have?||10
+need cheepest iphone plz
+want a budget iphone under 25000
+im lookin for iphne 11 but on a tight budjet
+pls suggest gud cheap iphone 4 me

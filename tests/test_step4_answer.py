@@ -118,6 +118,7 @@ def test_category_query_uses_product_family_from_config(monkeypatch: pytest.Monk
 
     monkeypatch.setattr(sa, "retrieve", fake_retrieve)
     monkeypatch.setattr(sa, "_call_openai", fake_call_openai)
+    monkeypatch.setenv("RACEN_CACHE_ENABLED", "0")
 
     ans, _ = sa.answer_query("how about macbooks?", top_k=3)
     assert ans  # sanity
@@ -176,3 +177,29 @@ def test_product_answer_uses_matching_chunk_not_exact_match_fallback(monkeypatch
     # Ensure the strict 'no exact match' fallback phrase is not used when a matching chunk exists
     assert "couldnt find an exact match" not in low
     assert "iphone 14 plus" in low
+
+
+def test_extract_family_hints_detects_iphone_aliases() -> None:
+    """_extract_family_hints should catch common noisy iPhone spellings in Hinglish."""
+
+    hints = sa._extract_family_hints("25000 ke ander konsa iphne hai?")
+    assert "iphone" in hints
+
+
+def test_preserve_family_hints_appends_missing_family() -> None:
+    """_preserve_family_hints should re-attach a missing iPhone family token after normalization."""
+
+    raw = "25000 ke ander konsa iphne hai?"
+    normalized = "Which phones are available under 25,000?"
+    out = sa._preserve_family_hints(raw, normalized)
+    low = out.lower()
+    assert "iphone" in low
+
+
+def test_preserve_family_hints_does_not_invent_family() -> None:
+    """_preserve_family_hints must not introduce a family when none was present in the raw query."""
+
+    raw = "cheapest phone batao"
+    normalized = "Which is the cheapest phone?"
+    out = sa._preserve_family_hints(raw, normalized)
+    assert "iphone" not in out.lower()
