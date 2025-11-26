@@ -10,6 +10,12 @@ from pathlib import Path
 from typing import Dict, List, Optional
 from urllib.parse import urlparse
 
+# Ensure local 'src' is importable before any racen.* imports.
+ROOT = Path(__file__).resolve().parents[1]
+SRC = ROOT / "src"
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
+
 from racen.assistant_meta import try_answer_meta_question
 
 def _read_text_file(path_str: str) -> str:
@@ -335,6 +341,7 @@ from racen.product_search import (
     product_search,
 )
 from racen.product_specs import ProductSpecs, extract_product_specs
+from racen.query_normalizer import normalize_query
 from racen.web_comparison import search_comparison
 
 logger = get_logger("scripts.step4_answer")
@@ -1367,7 +1374,7 @@ def _parse_price_filter(query: str) -> tuple[Optional[int], Optional[int], bool,
     if not q:
         return None, None, False, False
 
-    q_norm = q.replace(",", "")
+    q_norm = q.replace(",", "").replace(",", "")
     nums: List[int] = []
     for m in re.finditer(r"\b(\d{4,7})\b", q_norm):
         try:
@@ -1386,15 +1393,19 @@ def _parse_price_filter(query: str) -> tuple[Optional[int], Optional[int], bool,
         ]
     )
 
-    cheapest_only = any(
-        phrase in q
-        for phrase in [
-            "cheapest",
-            "least expensive",
-            "lowest price",
-            "lowest priced",
-        ]
-    )
+    cheapest_phrases = [
+        "cheapest",
+        "least expensive",
+        "lowest price",
+        "lowest priced",
+        "cheap",
+        "cheepest",
+        "inexpensive",
+        "budget iphone",
+        "budget iphones",
+        "on a budget",
+    ]
+    cheapest_only = any(phrase in q for phrase in cheapest_phrases)
 
     if len(nums) >= 2 and ("between" in q or ("from" in q and "to" in q)):
         lo = min(nums)
@@ -1518,8 +1529,11 @@ def _build_iphone_family_answer(query: str) -> Optional[str]:
                 "catalog. You can still browse all our iPhones here: "
                 "https://grest.in/collections/iphones"
             )
-        filtered.sort(key=lambda it: it[2] or 0, reverse=True)
-        chosen = filtered[:3]
+        # For explicit price-range queries (between/under/over), list all matching
+        # iPhones within the band in ascending price order so we do not silently
+        # drop mid-range options.
+        filtered.sort(key=lambda it: it[2] or 0)
+        chosen = filtered
         header = "Here are iPhones we currently have in that price range:"
     elif most_expensive_only and priced:
         priced.sort(key=lambda it: it[2] or 0, reverse=True)
@@ -1587,13 +1601,30 @@ def answer_query(
     previous_answer: str = "",
     previous_user: str = "",
 ) -> tuple[str, List[Citation]]:
+    raw_query = query
     # Early deterministic handling for assistant meta questions
     try:
-        meta = try_answer_meta_question(query)
+        meta = try_answer_meta_question(raw_query)
     except Exception:
         meta = None
     if meta:
         return meta, []
+
+    # LLM-based normalization for noisy queries (typos/Hinglish) before
+    # intent/domain/price parsing. This never raises and falls back to the
+    # original query on any error or when disabled.
+    try:
+        mode_hint = _detect_mode(raw_query)
+        locale_hint = "hi-IN" if mode_hint == "HI_EN" else "en-IN"
+    except Exception:
+        locale_hint = None
+    try:
+        norm = normalize_query(raw_query, user_locale=locale_hint)
+        norm_q = (norm.normalized_query or raw_query).strip()
+        if norm_q:
+            query = norm_q
+    except Exception:
+        query = raw_query
     # Detect user intent for conversational follow-ups via classifier abstraction
     intent, last_intent = _classify_intent(query, previous_answer)
     domain_tag = ""
@@ -1750,7 +1781,7 @@ def answer_query(
 
     # Early exit for unclear intent: ask user to rephrase instead of guessing
     if intent == "unclear":
-        mode = _detect_mode(query or previous_user)
+        mode = _detect_mode(previous_user or raw_query)
         if mode == "HI_EN":
             msg = "Mujhe thoda clear nahi hua. Please thoda detail mein ya alag tareeke se bataoge?"
         else:
@@ -1961,7 +1992,7 @@ def answer_query(
                 family_answer = _build_iphone_family_answer(query)
                 if family_answer:
                     return family_answer, []
-        static_msg = _build_static_noanswer_message(query, previous_user)
+        static_msg = _build_static_noanswer_message(raw_query, previous_user)
         return static_msg, []
 
     # Optional external web comparison augmentation for comparison-style queries.
@@ -2068,7 +2099,7 @@ def answer_query(
     tone = _detect_tone(previous_user or query) if tone_on else "neutral"
 
     def _build_fallback_text() -> str:
-        mode = _detect_mode(query)
+        mode = _detect_mode(previous_user or raw_query)
         graceful = os.getenv("ANSWER_FALLBACK_GRACEFUL", "0") in {"1", "true", "TRUE", "yes"}
         use_emoji = False
         try:
@@ -2152,7 +2183,7 @@ def answer_query(
         out_text = _strip_followup_tail(out_text)
     low = out_text.strip().lower()
     if fallback_on and (low.startswith("not found in sources provided")):
-        static_msg = _build_static_noanswer_message(query, previous_user)
+        static_msg = _build_static_noanswer_message(raw_query, previous_user)
         return static_msg, []
     # If user explicitly asked for shipping charges but none of the retrieved texts contain charge-like tokens,
     # use the static fallback even if the model produced a generic shipping answer.
@@ -2162,7 +2193,7 @@ def answer_query(
             ctx_join = " ".join((it.text or "") for it in items[:6]).lower()
             ctx_has_charges = any(tok in ctx_join for tok in ["charge", "charges", "fee", "fees", "cost", "costs", "aa", "rs ", "rs."])
             if not ctx_has_charges:
-                static_msg = _build_static_noanswer_message(query, previous_user)
+                static_msg = _build_static_noanswer_message(raw_query, previous_user)
                 return static_msg, []
 
     # For product intents where the catalog cannot find a specific model but
@@ -2212,7 +2243,7 @@ def answer_query(
         support_phone = (os.getenv("SUPPORT_PHONE", "") or "").strip()
         support_email = (os.getenv("SUPPORT_EMAIL", "") or "").strip()
         contact_link = "https://grest.in/pages/contact-us"
-        mode = _detect_mode(previous_user or query)
+        mode = _detect_mode(previous_user or raw_query)
         if support_phone or support_email:
             if mode == "HI_EN":
                 parts: List[str] = ["Yeh contact details hain:"]
@@ -2235,7 +2266,7 @@ def answer_query(
     if followups_on and effective_intent != "product":
         lower = out_text.lower()
         if "follow-ups:" not in lower and "follow ups:" not in lower:
-            mode = _detect_mode(query)
+            mode = _detect_mode(previous_user or raw_query)
             offer = None
             # Domain-specific follow-up for brand reputation so we talk about reviews/links
             # instead of generic policy wording.
@@ -2338,7 +2369,7 @@ def answer_query(
     # Language force-rewrite guard (optional)
     lang_lock_on = os.getenv("ANSWER_LANGUAGE_LOCK", "0") in {"1", "true", "TRUE", "yes"}
     lang_force_on = os.getenv("ANSWER_LANGUAGE_FORCE_REWRITE", "0") in {"1", "true", "TRUE", "yes"}
-    target_mode = _detect_mode(previous_user or query)
+    target_mode = _detect_mode(previous_user or raw_query)
     current_mode = _detect_mode(out_text)
     if lang_lock_on and lang_force_on and current_mode != target_mode:
         out_text = _rewrite_language(out_text, target_mode)
@@ -2368,7 +2399,7 @@ def answer_query(
         support_phone = (os.getenv("SUPPORT_PHONE", "") or "").strip()
         support_email = (os.getenv("SUPPORT_EMAIL", "") or "").strip()
         contact_link = "https://grest.in/pages/contact-us"
-        mode_es = _detect_mode(previous_user or query)
+        mode_es = _detect_mode(previous_user or raw_query)
         emoji_es = " 🙂" if (tone != "upset" and int(os.getenv("PERSONA_EMOJI_LEVEL", "0") or 0) > 0) else ""
         if mode_es == "HI_EN":
             esc = [

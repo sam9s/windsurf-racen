@@ -10,6 +10,7 @@
 - [ ] Add category/browse behavior for product families (e.g., macbooks/iphones) so RACEN can list products. (ID: answer-category-browse)
 - [ ] Tighten product matching so qualifiers like "retina", year, and size are respected and we don’t show a non-matching model as if it were exact. (ID: answer-product-qualifier-matching)
 - [ ] Implement Planner → Extractor → Phraser pipeline for product answers, starting with the full Grest iPhone catalog (all current iPhone product URLs) as the template set, so RACEN can deterministically pick primary + variant products and surface exact specs/prices from pages. (ID: answer-product-pipeline-plan)
+- [ ] Add messed-up English normalization benchmark (txt + MD report script mirroring the 51-query harness). (ID: answer-messed-up-english-benchmark, added 2025-11-23)
 
 ### Trust & Reputation
 - [ ] Trustpilot/MouthShut URLs are already injected; ensure indexing/routing and clear External labeling; maintain tests for citations and summaries. (ID: answer-trustpilot-brand-reputation)
