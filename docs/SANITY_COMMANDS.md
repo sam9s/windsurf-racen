@@ -26,3 +26,14 @@ Notes
 - Column is `source` (not `url`).
 - Our ingestion writes to `docling` schema (PGOPTIONS sets search_path).
 - Use these exact commands for consistency across runs.
+
+---
+
+## Local Python sanity checks (no psql)
+
+Use this from the Windsurf_Project root when psql is not available on the host.
+
+- iPhone product specs table snapshot
+```
+python -c "from src.racen.step2_write import DBConfig, get_conn; cfg=DBConfig.from_env(); conn=get_conn(cfg); cur=conn.cursor(); cur.execute('SELECT slug FROM docling.grest_iphone_product_specs ORDER BY slug'); rows=cur.fetchall(); print('COUNT=', len(rows)); print('SLUGS=', [r['slug'] for r in rows]); conn.close()"
+```
