@@ -448,3 +448,70 @@ For more details on the long-term normalization and multi-brand plan, see `docs/
   - Example: ensure queries containing misspellings like `iphne` or `iphon` are still treated as "iPhone" rather than generic "phone" so they route into the existing deterministic iPhone family price flows.
 - Re-run the Hinglish 8-query normalization and output-rewriter reports and adjust tests so that all clearly iPhone-specific Hinglish price queries hit the catalog-backed iPhone helper instead of the static no-answer fallback.
 - Keep the broader alias-based, multi-brand product_search design in Phase 3, implementing only the minimal family/brand-preservation slice now so it can be extended later when more product families and a dedicated product DB are introduced.
+
+## Update – 2025-11-27 (51-Query Holy Grail Harness & Gap Tracker Round 1)
+
+### Completed Since Last Update
+
+- **51-query "holy grail" mother harness run (cold + hot)**
+  - Ran `tests/Comprehensive_E2E_Tests/Test_Queries/holy_grail_51_full_e2e.txt` end-to-end through the Answer API and wrote a consolidated Markdown report at:
+    - `tests/Comprehensive_E2E_Tests/Test_Results/full_e2e_holy_grail_51_full_e2e_20251126_213050.md`.
+  - Each query logs: original text, normalized text, effective query, detected mode, top_k, status (ok/fallback/error), latencies, final answer, and citations.
+
+- **Gap tracker for the 51-query harness (Round 1)**
+  - Created a dedicated gaps spec file:
+    - `tests/Comprehensive_E2E_Tests/GAPS_to_Work/gaps_holy_grail_51_round1.md`.
+  - Documented 9 gaps observed from the mother run with:
+    - Descriptions, example queries (by index), current behavior, and strict closure criteria.
+  - Marked **Gap 1 (generic iPhone family browse flows)** as CLOSED based on deterministic catalog-backed behavior and tests; all other gaps (2–9) remain OPEN until verified via full harness re-runs.
+
+- **Business facts and canonical URLs wiring (foundation for gaps 2/4/5)**
+  - Extended `Grest_Data/business_facts.yaml` and `src/racen/business_facts.py` to include a canonical `warranty` URL alongside `contact`, `returns`, `shipping`, `privacy`, `terms`, `trustpilot`, and `mouthshut`.
+  - Implemented `_ensure_canonical_links` in `scripts/step4_answer.py` and wired it into the answer pipeline (including cache hits) so that policy/support/brand-reputation answers always surface the right URLs in the visible text, not only in citations.
+  - Augmented the assistant meta privacy answer (`src/racen/assistant_meta.py`) to append the canonical privacy policy URL from `business_facts` when present.
+
+- **Targeted CLI validation for URL consistency (gaps 2, 4, 5 – not yet signed off)**
+  - Ran only the canonical 51-set queries tied to gaps 2, 4, and 5 via:
+    - `python scripts/step4_answer.py --q "..."`.
+  - Observed current behavior (to be re-validated via full harness + Slack before marking any gap CLOSED):
+    - Policy/support (Q22–Q27): shipping, warranty, returns/cancellation, privacy, terms now include at least one canonical policy URL in the answer body.
+    - Contact (Q33–Q34): phone and email answers now also surface `https://grest.in/pages/contact-us` in the visible text.
+    - Brand reputation (Q35–Q42): brand-reputation domain answers are post-processed to append both Trustpilot and MouthShut review URLs when missing.
+  - These changes address the mechanics for gaps 2, 4, and 5, but the gaps remain **OPEN** until we:
+    - Re-run the full 51-query harness,
+    - Cross-check behaviors in Slack,
+    - And update the gaps tracker accordingly.
+
+### Current Gaps Status (Holy Grail 51 Round 1 – high-level)
+
+- **Gap 1 – Generic iPhone family browse flows**
+  - CLOSED (deterministic iPhone family helper + tests).
+
+- **Gap 2 – Policy / shipping / returns / cancellation / warranty URLs**
+  - Mechanics implemented (business facts + `_ensure_canonical_links` + meta privacy URL), behavior promising in CLI; still marked OPEN pending full-suite verification.
+
+- **Gap 3 – COD availability + Gap 9 – COD variants**
+  - OPEN: direct "Do you offer cash on delivery?" and similar COD-availability questions still route to generic fallback; requires a small deterministic handler driven by `business_facts.payment.cod_enabled` and basic COD intent detection.
+
+- **Gap 4 – Support contact answers must include URLs**
+  - Mechanics implemented (contact answers now include `contact-us` URL in CLI); still OPEN until verified in the full harness + Slack.
+
+- **Gap 5 – Brand reputation (Trustpilot / MouthShut) URLs**
+  - Mechanics implemented at domain level; OPEN pending confirmation that all 8 brand-reputation queries consistently show the URLs in the mother report and Slack.
+
+- **Gap 6 – Comparison flows (iPhone vs iPhone; internal vs web)**
+  - OPEN: most iPhone vs iPhone comparisons behave correctly using internal data; the specific "difference between iPhone 14 and iPhone 15" query still falls back.
+
+- **Gap 7 – Grest vs Cashify (brand vs competitor web comparison)**
+  - OPEN / PARKED: intentionally deferred until a robust web-comparison layer is designed around `web_comparison.py` (DuckDuckGo via SerpAPI) with guardrails and clear External labeling.
+
+- **Gap 8 – Mode detection / output language mismatch for simple English queries**
+  - OPEN: rare but important issue where some simple English support queries (e.g., Q34) are detected as Hinglish and answered in Hinglish; needs stronger mode detection/locking rules.
+
+### Next Actions (short-term, Holy Grail 51 Round 1)
+
+1) Re-run the full 51-query holy grail harness after current code changes and write a new MD report.
+2) Compare the new report against `gaps_holy_grail_51_round1.md`; only then consider marking gaps 2, 4, and 5 as CLOSED (or partially closed) based on end-to-end evidence.
+3) Implement deterministic COD availability handling from `business_facts` and cover gap 3 + gap 9 via CLI and harness.
+4) Address the 14 vs 15 comparison gap (gap 6) using internal catalog/blog context with a robust fallback when web comparison is rate-limited.
+5) Design a clear plan for gap 7 (web comparison) and gap 8 (language-mode edge cases) and record it in the gaps tracker before implementation.

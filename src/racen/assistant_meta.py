@@ -15,6 +15,8 @@ from __future__ import annotations
 import re
 from typing import Optional
 
+from racen.business_facts import get_business_facts
+
 
 _META_PATTERNS = {
     "identity": [
@@ -138,12 +140,22 @@ def try_answer_meta_question(query: str) -> Optional[str]:
 
     # Privacy & data usage
     if _match_any(ql, _META_PATTERNS["privacy"]):
-        return (
+        base = (
             "I use the text you send here and GREST’s public content to answer. "
             "I don’t store personal data by default. Some responses may be "
             "cached briefly to improve speed. For details, see GREST’s "
             "privacy policy."
         )
+        # Append canonical privacy policy URL when available in business facts.
+        try:
+            biz = get_business_facts()
+            urls_cfg = getattr(biz, "urls", None)
+            privacy_url = getattr(urls_cfg, "privacy", None) if urls_cfg else None
+        except Exception:
+            privacy_url = None
+        if privacy_url:
+            return f"{base} Full privacy policy: {privacy_url}"
+        return base
 
     # Human/bot
     if _match_any(ql, _META_PATTERNS["human"]):

@@ -132,7 +132,19 @@ def _status_for_answer(ans: str) -> str:
     t = (ans or "").strip().lower()
     if not t:
         return "error"
+    # Explicit RAG "no answer" signal from the core prompt.
     if t.startswith("not found in sources provided"):
+        return "fallback"
+    # Static graceful fallbacks from step4_answer (both English and Hinglish
+    # variants) should also be treated as fallback, not OK. We mirror the
+    # phrases used in _build_static_noanswer_message and related helpers
+    # without importing private functions.
+    if (
+        "rephrase your question" in t
+        or t.startswith("exact info nahi mila")
+        or t.startswith("i couldn")
+        or "couldnt find an exact answer" in t
+    ):
         return "fallback"
     return "ok"
 

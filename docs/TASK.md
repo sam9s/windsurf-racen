@@ -12,6 +12,9 @@
 - [ ] Implement Planner → Extractor → Phraser pipeline for product answers, starting with the full Grest iPhone catalog (all current iPhone product URLs) as the template set, so RACEN can deterministically pick primary + variant products and surface exact specs/prices from pages. (ID: answer-product-pipeline-plan)
 - [ ] Add messed-up English normalization benchmark (txt + MD report script mirroring the 51-query harness). (ID: answer-messed-up-english-benchmark, added 2025-11-23)
 
+### Evaluation / Gaps
+- [ ] Close gaps 2–9 from the 51-query "holy grail" harness (Round 1) using `tests/Comprehensive_E2E_Tests/GAPS_to_Work/gaps_holy_grail_51_round1.md` as the canonical tracker. (ID: answer-holy-grail-gaps-round1)
+
 ### Trust & Reputation
 - [ ] Trustpilot/MouthShut URLs are already injected; ensure indexing/routing and clear External labeling; maintain tests for citations and summaries. (ID: answer-trustpilot-brand-reputation)
 

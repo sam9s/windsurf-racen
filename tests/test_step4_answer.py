@@ -203,3 +203,26 @@ def test_preserve_family_hints_does_not_invent_family() -> None:
     normalized = "Which is the cheapest phone?"
     out = sa._preserve_family_hints(raw, normalized)
     assert "iphone" not in out.lower()
+
+
+def test_preserve_brand_hints_reinserts_grest() -> None:
+    """_preserve_brand_hints should re-attach the Grest token after normalisation.
+
+    This guards against the LLM turning "GREST rating" into
+    "great rating" and losing the brand name altogether.
+    """
+
+    raw = "GREST rating"
+    normalized = "great rating"
+    out = sa._preserve_brand_hints(raw, normalized)
+    low = out.lower()
+    assert "grest" in low
+
+
+def test_preserve_brand_hints_does_not_invent_brand() -> None:
+    """_preserve_brand_hints must not introduce Grest when it was not present."""
+
+    raw = "best rating"
+    normalized = "great rating"
+    out = sa._preserve_brand_hints(raw, normalized)
+    assert "grest" not in out.lower()

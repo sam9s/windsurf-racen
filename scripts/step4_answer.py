@@ -181,6 +181,141 @@ def _limit_first_bubble(text: str, max_sent: int = 2) -> str:
     return limited_first if not rest else f"{limited_first}\n\n{rest}"
 
 
+def _ensure_canonical_links(
+    text: str,
+    effective_intent: str,
+    domain_tag: str,
+    query: str,
+    target_mode: str,
+) -> str:
+    """Append canonical policy/support/review URLs when required.
+
+    Args:
+        text: Model answer text.
+        effective_intent: Final intent used for retrieval/prompting.
+        domain_tag: Optional domain tag such as ``brand_reputation``.
+        query: Original normalized query text.
+        target_mode: Detected target language mode (e.g., ``EN`` or ``HI_EN``).
+
+    Returns:
+        str: Answer text with any missing canonical URLs appended.
+    """
+
+    if not text:
+        return text
+    try:
+        biz = get_business_facts()
+    except Exception:
+        return text
+    urls_cfg = getattr(biz, "urls", None)
+    if urls_cfg is None:
+        return text
+
+    base = text or ""
+    ql = (query or "").lower()
+    ei = (effective_intent or "").lower()
+    dt = (domain_tag or "").lower()
+    tmode = (target_mode or "").upper()
+    is_hinglish = tmode == "HI_EN"
+
+    def _has_url(u: Optional[str]) -> bool:
+        return bool(u and (u in base))
+
+    extras: List[str] = []
+
+    # Shipping policy URL
+    if ei == "shipping" and urls_cfg.shipping and not _has_url(urls_cfg.shipping):
+        if is_hinglish:
+            extras.append(
+                f"Detailed shipping policy yahan mil jayegi: {urls_cfg.shipping}"
+            )
+        else:
+            extras.append(
+                f"For detailed shipping policy, please visit: {urls_cfg.shipping}"
+            )
+
+    # Returns / cancellation policy URL
+    if ei == "returns" and urls_cfg.returns and not _has_url(urls_cfg.returns):
+        if is_hinglish:
+            extras.append(
+                f"Returns aur cancellation policy ka full detail yahan hai: {urls_cfg.returns}"
+            )
+        else:
+            extras.append(
+                f"For full returns and cancellation policy, see: {urls_cfg.returns}"
+            )
+
+    # Warranty policy URL
+    w_url = getattr(urls_cfg, "warranty", None)
+    if ei == "warranty" and w_url and not _has_url(w_url):
+        if is_hinglish:
+            extras.append(
+                f"Warranty policy ka full detail yahan milta hai: {w_url}"
+            )
+        else:
+            extras.append(f"For complete warranty policy, visit: {w_url}")
+
+    # Privacy / terms policy URLs
+    if ei == "policy":
+        if "privacy" in ql and urls_cfg.privacy and not _has_url(urls_cfg.privacy):
+            if is_hinglish:
+                extras.append(
+                    f"Privacy policy ka full text yahan available hai: {urls_cfg.privacy}"
+                )
+            else:
+                extras.append(
+                    f"For the full privacy policy, please see: {urls_cfg.privacy}"
+                )
+        if any(tok in ql for tok in ["terms", "condition"]):
+            if urls_cfg.terms and not _has_url(urls_cfg.terms):
+                if is_hinglish:
+                    extras.append(
+                        f"Terms and conditions ka full text yahan hai: {urls_cfg.terms}"
+                    )
+                else:
+                    extras.append(
+                        f"For detailed terms and conditions, visit: {urls_cfg.terms}"
+                    )
+
+    # Contact/support page URL
+    if ei == "contact" and urls_cfg.contact and not _has_url(urls_cfg.contact):
+        if is_hinglish:
+            extras.append(
+                f"Contact details aur help ke liye yeh page use karo: {urls_cfg.contact}"
+            )
+        else:
+            extras.append(
+                f"For full contact options, you can also visit: {urls_cfg.contact}"
+            )
+
+    # Brand reputation URLs (Trustpilot / MouthShut)
+    if dt == "brand_reputation":
+        tp = getattr(urls_cfg, "trustpilot", None) or ""
+        ms = getattr(urls_cfg, "mouthshut", None) or ""
+        lines: List[str] = []
+        if tp and not _has_url(tp):
+            if is_hinglish:
+                lines.append(f"Trustpilot reviews yahan dekh sakte ho: {tp}")
+            else:
+                lines.append(
+                    f"You can read detailed Trustpilot reviews here: {tp}"
+                )
+        if ms and not _has_url(ms):
+            if is_hinglish:
+                lines.append(f"MouthShut reviews ke liye yeh link use karo: {ms}")
+            else:
+                lines.append(
+                    f"You can also see MouthShut reviews here: {ms}"
+                )
+        if lines:
+            extras.append(" ".join(lines))
+
+    if not extras:
+        return text
+
+    return f"{base}\n\n{' '.join(extras)}"
+
+
 def _strip_followup_tail(text: str) -> str:
     """Strip trailing follow-up-style prompts from an answer.
 
@@ -344,6 +479,7 @@ from racen.product_specs import ProductSpecs, extract_product_specs
 from racen.query_normalizer import normalize_query
 from racen.answer_output_rewriter import rewrite_answer_language
 from racen.web_comparison import search_comparison
+from racen.business_facts import get_business_facts
 
 logger = get_logger("scripts.step4_answer")
 
@@ -541,6 +677,7 @@ def _compose_prompt(
     is_comparison: bool = False,
 ) -> str:
     lines: List[str] = []
+    dt = (domain_tag or "").lower()
     # Persona: prepend system prompt if provided
     persona_path = os.getenv(
         "PERSONA_SYSTEM_PROMPT_PATH",
@@ -650,6 +787,68 @@ def _compose_prompt(
         if support_address:
             lines.append(f"- Support address: {support_address}")
         lines.append("")
+
+    # Inject small, structured business facts from YAML so that key answers
+    # (payments, COD, returns window, support hours and canonical URLs) stay
+    # consistent and can later be backed by another storage without changing
+    # callers.
+    try:
+        biz = get_business_facts()
+    except Exception:
+        biz = None
+    if biz is not None:
+        # Payment and COD configuration for order/buy style queries.
+        if intent == "order_buy" and biz.payment is not None:
+            methods = ", ".join(biz.payment.methods or [])
+            cod_flag = "enabled" if biz.payment.cod_enabled else "disabled"
+            if methods or biz.payment.cod_enabled:
+                lines.append("Authoritative payment facts (from Grest configuration):")
+                if methods:
+                    lines.append(f"- Payment methods: {methods}")
+                lines.append(f"- Cash on Delivery (COD): {cod_flag}.")
+                lines.append("")
+        # Support hours for contact/shipping/order queries.
+        if intent in {"contact", "order_buy", "shipping"} and biz.support is not None:
+            if biz.support.hours_weekday or biz.support.hours_weekend:
+                lines.append("Authoritative support hours (from Grest configuration):")
+                if biz.support.hours_weekday:
+                    lines.append(f"- Weekdays: {biz.support.hours_weekday}")
+                if biz.support.hours_weekend:
+                    lines.append(f"- Weekends/holidays: {biz.support.hours_weekend}")
+                lines.append("")
+        # Returns window for returns intent.
+        if intent == "returns" and biz.returns is not None and biz.returns.window_days:
+            lines.append("Authoritative returns facts (from Grest configuration):")
+            lines.append(
+                f"- Standard return window: {biz.returns.window_days} days from delivery."
+            )
+            lines.append("")
+        # Canonical URLs for policies and reviews so the model can surface
+        # them consistently in answers.
+        urls_cfg = biz.urls
+        if urls_cfg is not None:
+            should_list_policy_urls = intent in {"returns", "shipping", "policy"}
+            should_list_contact_url = intent == "contact"
+            should_list_review_urls = dt == "brand_reputation"
+            if should_list_policy_urls or should_list_contact_url or should_list_review_urls:
+                lines.append("Canonical URLs (for model reference, do not show section title to user):")
+                if should_list_contact_url and urls_cfg.contact:
+                    lines.append(f"- Contact page: {urls_cfg.contact}")
+                if should_list_policy_urls:
+                    if urls_cfg.returns:
+                        lines.append(f"- Returns & cancellations: {urls_cfg.returns}")
+                    if urls_cfg.shipping:
+                        lines.append(f"- Shipping policy: {urls_cfg.shipping}")
+                    if urls_cfg.privacy:
+                        lines.append(f"- Privacy policy: {urls_cfg.privacy}")
+                    if urls_cfg.terms:
+                        lines.append(f"- Terms & conditions: {urls_cfg.terms}")
+                if should_list_review_urls:
+                    if urls_cfg.trustpilot:
+                        lines.append(f"- Trustpilot reviews: {urls_cfg.trustpilot}")
+                    if urls_cfg.mouthshut:
+                        lines.append(f"- MouthShut reviews: {urls_cfg.mouthshut}")
+                lines.append("")
     # Inject a small internal catalog match summary for product intents so
     # the model understands whether the requested variant exists or is only
     # close to a catalog item, and which URL is authoritative.
@@ -780,7 +979,6 @@ def _compose_prompt(
         lines.append("- Do not add inline [n] markers or a 'Citations' section; the caller will attach citations separately.")
     lines.append("- Do NOT use any external knowledge beyond the provided context.")
     # Brand reputation guidance: explicitly refer to review sites when summarising ratings.
-    dt = (domain_tag or "").lower()
     if dt == "brand_reputation":
         lines.append(
             "- This question is about brand reputation and customer reviews. Use the review context (for example from Trustpilot or Mouthshut) to answer. When you describe ratings, explicitly name the review site (such as 'Trustpilot' or 'Mouthshut') instead of only saying 'TrustScore'."
@@ -1026,6 +1224,61 @@ def _preserve_family_hints(raw_query: str, normalized_query: str) -> str:
     low = out.lower()
     for fam in sorted(raw_hints):
         token = "iphone" if fam == "iphone" else fam
+        if token and token not in low:
+            if out:
+                out = f"{out} {token}"
+            else:
+                out = token
+            low = out.lower()
+    return out
+
+
+def _extract_brand_hints(text: str) -> set[str]:
+    """Extract explicit brand tokens from the raw query text.
+
+    Args:
+        text: Raw user query text.
+
+    Returns:
+        set[str]: Lowercased brand tokens such as "grest".
+    """
+
+    q = (text or "").lower()
+    hints: set[str] = set()
+    # For now we only track the Grest brand token; this can be extended later
+    # to other brands without changing the preservation logic.
+    if "grest" in q or "grest.in" in q:
+        hints.add("grest")
+    return hints
+
+
+def _preserve_brand_hints(raw_query: str, normalized_query: str) -> str:
+    """Preserve detected brand tokens when applying normalization.
+
+    This mirrors the family-preservation behaviour but is scoped to brand
+    names such as "Grest" so that normalisation cannot silently turn
+    "GREST rating" into "great rating".
+
+    Args:
+        raw_query: Original user query text.
+        normalized_query: Normalized query text returned by the LLM.
+
+    Returns:
+        str: Normalized text with any missing brand tokens re-attached.
+    """
+
+    base = (normalized_query or "").strip()
+    if not raw_query:
+        return base or normalized_query or ""
+    raw_hints = _extract_brand_hints(raw_query)
+    if not raw_hints:
+        return base or normalized_query or ""
+    if not base:
+        base = normalized_query or ""
+    out = base or ""
+    low = out.lower()
+    for brand in sorted(raw_hints):
+        token = brand
         if token and token not in low:
             if out:
                 out = f"{out} {token}"
@@ -1730,6 +1983,7 @@ def answer_query(
         norm_q_raw = (norm.normalized_query or raw_query).strip()
         if norm_q_raw:
             norm_q = _preserve_family_hints(raw_query, norm_q_raw)
+            norm_q = _preserve_brand_hints(raw_query, norm_q)
             query = norm_q or norm_q_raw
     except Exception:
         query = raw_query
@@ -1816,17 +2070,17 @@ def answer_query(
                 except Exception:
                     min_p, max_p, most_exp_only, cheapest_only = None, None, False, False
                 ql_family = (query or "").lower()
-                is_family_browse = any(
-                    phrase in ql_family
-                    for phrase in [
-                        "what all iphones",
-                        "what all iphone",
-                        "all iphones you have",
-                        "all iphone you have",
-                        "what iphones you have",
-                        "which iphones you have",
-                    ]
-                )
+                # Family browse detection should remain robust even after
+                # normalisation rewrites phrasing (for example turning
+                # "what all iPhones you have" into "what iPhones do you
+                # have"), so we combine a few soft signals instead of
+                # relying on exact phrases.
+                browse_signals = ["what", "which", "how many", "kya", "kitne"]
+                have_signals = ["have", "available", "in stock", "milte", "mil rahe"]
+                has_family_word = "iphone" in ql_family or "iphones" in ql_family
+                has_browse_word = any(sig in ql_family for sig in browse_signals)
+                has_have_word = any(sig in ql_family for sig in have_signals)
+                is_family_browse = has_family_word and has_browse_word and has_have_word
                 # Decide domain via classifier to avoid hardcoding phrases.
                 # If classifier says buying_advice, route to blogs/news and
                 # skip family/specs fallback. Otherwise keep product_specs.
@@ -2015,7 +2269,20 @@ def answer_query(
                         )
                     except Exception:
                         continue
-                return str(cached.get("answer") or ""), cits
+                cached_answer = str(cached.get("answer") or "")
+                # Ensure canonical URLs are present even for cached answers.
+                try:
+                    target_mode_cached = _detect_mode(previous_user or raw_query)
+                except Exception:
+                    target_mode_cached = "EN"
+                ensured_answer = _ensure_canonical_links(
+                    cached_answer,
+                    effective_intent=effective_intent,
+                    domain_tag=domain_tag or "",
+                    query=query,
+                    target_mode=target_mode_cached,
+                )
+                return ensured_answer, cits
     except Exception:
         pass
 
@@ -2493,6 +2760,15 @@ def answer_query(
     if lang_lock_on and lang_force_on and current_mode != target_mode:
         out_text = _rewrite_language(out_text, target_mode)
         current_mode = _detect_mode(out_text)
+
+    # Ensure canonical policy/support/review URLs are present where required.
+    out_text = _ensure_canonical_links(
+        out_text,
+        effective_intent=effective_intent,
+        domain_tag=domain_tag or "",
+        query=query,
+        target_mode=target_mode,
+    )
 
     # Snapshot debug info for ribbon when enabled
     try:

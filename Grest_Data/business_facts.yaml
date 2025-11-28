@@ -1,0 +1,28 @@
+payment:
+  methods:
+    - UPI
+    - credit_card
+    - debit_card
+    - net_banking
+    - COD
+  cod_enabled: true
+
+support:
+  phone: "+91 92665 22338"
+  email: "care@grest.in"
+  hours:
+    weekday: "10:00-19:00 IST"
+    weekend: "11:00-18:00 IST"
+
+returns:
+  window_days: 7
+
+urls:
+  contact: "https://grest.in/pages/contact-us"
+  returns: "https://grest.in/pages/returns-refund-cancellation"
+  shipping: "https://grest.in/policies/shipping/policy"
+  warranty: "https://grest.in/pages/warranty"
+  privacy: "https://grest.in/policies/privacy-policy"
+  terms: "https://grest.in/policies/terms-of-service"
+  trustpilot: "https://www.trustpilot.com/review/grest.in"
+  mouthshut: "https://www.mouthshut.com/product-reviews/grest-reviews-926180198"
