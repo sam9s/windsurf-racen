@@ -615,6 +615,110 @@ def _load_product_specs_for_candidates(match: Optional[ProductSearchResult]) -> 
     return specs_by_url
 
 
+def _load_iphone_prices_from_db() -> Dict[str, Dict[str, Optional[int]]]:
+    """Load manual iPhone prices from the product specs table.
+
+    This reads ``docling.grest_iphone_product_specs`` and returns a mapping
+    keyed by canonical product URL handle (for example,
+    ``https://grest.in/products/refurbished-apple-iphone-13``) to a small
+    dict with Superb/Good/Fair integer prices when available.
+
+    The mapping is intentionally minimal so that higher-level logic can decide
+    how to combine condition prices (for example, using the lowest available
+    price as the starting point for budget filters).
+
+    Returns:
+        Dict[str, Dict[str, Optional[int]]]: Mapping from canonical URL handle
+        to a dict containing ``price_superb``, ``price_good`` and
+        ``price_fair`` keys.
+    """
+
+    prices_by_url: Dict[str, Dict[str, Optional[int]]] = {}
+
+    try:
+        conn = get_conn(DBConfig.from_env())
+    except Exception:
+        return prices_by_url
+
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT slug, price_superb, price_good, price_fair, product_url
+                FROM docling.grest_iphone_product_specs
+                """
+            )
+            rows = cur.fetchall()
+    except Exception:
+        return prices_by_url
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+    for row in rows or []:
+        try:
+            product_url = (row.get("product_url") or "").strip()
+        except Exception:
+            product_url = ""
+        if not product_url:
+            continue
+        handle = product_url.split("?", 1)[0].rstrip("/")
+        if not handle:
+            continue
+        prices_by_url[handle] = {
+            "price_superb": row.get("price_superb"),
+            "price_good": row.get("price_good"),
+            "price_fair": row.get("price_fair"),
+        }
+
+    return prices_by_url
+
+
+def _overlay_manual_iphone_prices_into_specs(
+    specs_by_url: Dict[str, ProductSpecs],
+) -> Dict[str, ProductSpecs]:
+    """Overlay manual iPhone prices into scraped product specs.
+
+    Args:
+        specs_by_url: Mapping from product URL to scraped ProductSpecs.
+
+    Returns:
+        Dict[str, ProductSpecs]: The same mapping with ``price_strings``
+        replaced by canonical prices for any products present in the iPhone
+        specs table.
+    """
+
+    if not specs_by_url:
+        return specs_by_url
+
+    manual_prices_by_url = _load_iphone_prices_from_db()
+    if not manual_prices_by_url:
+        return specs_by_url
+
+    for url, specs in specs_by_url.items():
+        if not url or specs is None:
+            continue
+        handle = url.split("?", 1)[0].rstrip("/")
+        if not handle:
+            continue
+        manual = manual_prices_by_url.get(handle)
+        if manual is None:
+            continue
+        candidates: List[int] = []
+        for key in ("price_superb", "price_good", "price_fair"):
+            val = manual.get(key)
+            if isinstance(val, int):
+                candidates.append(val)
+        if not candidates:
+            continue
+        price_val = min(candidates)
+        specs.price_strings = [f"Rs. {price_val:,}"]
+
+    return specs_by_url
+
+
 def build_product_answer_plan(query: str, match: Optional[ProductSearchResult]) -> ProductAnswerPlan:
     """Build a deterministic answer plan from catalog match results.
 
@@ -1814,6 +1918,12 @@ def _build_iphone_family_answer(query: str) -> Optional[str]:
     if family != "iphone":
         return None
 
+    # Extract a specific requested iPhone label (for example, "iPhone 17") so
+    # we can explicitly say when that exact model is not present in the
+    # catalog instead of only listing generic options.
+    requested_label = _extract_requested_iphone_label(query)
+    requested_label_lower = (requested_label or "").lower()
+
     catalog: List[ProductCandidate] = list_family_products("iphone")
     if not catalog:
         return None
@@ -1831,19 +1941,43 @@ def _build_iphone_family_answer(query: str) -> Optional[str]:
         except Exception:
             specs_by_url = {}
 
+    # Load manual prices from the dedicated iPhone specs table. These override
+    # scraped prices when present so that business-configured prices are the
+    # primary source of truth.
+    manual_prices_by_url = _load_iphone_prices_from_db()
+
     items: List[tuple[ProductCandidate, Optional[ProductSpecs], Optional[int], str]] = []
     for cand in catalog:
         url = (getattr(cand, "url", "") or "").strip()
+        handle = url.split("?", 1)[0].rstrip("/")
         sp = specs_by_url.get(url)
         price_val: Optional[int] = None
         display_price = ""
-        if sp and sp.price_strings:
+
+        # 1) Prefer manual prices from grest_iphone_product_specs when
+        # available, using the lowest non-null condition price as the
+        # "starting" price for budget filters and family listings.
+        manual = manual_prices_by_url.get(handle)
+        if manual is not None:
+            candidates: List[int] = []
+            for key in ("price_superb", "price_good", "price_fair"):
+                val = manual.get(key)
+                if isinstance(val, int):
+                    candidates.append(val)
+            if candidates:
+                price_val = min(candidates)
+                display_price = f"Rs. {price_val:,}"
+
+        # 2) If no manual price is configured, fall back to scraped price
+        # strings extracted from the corpus.
+        if price_val is None and sp and sp.price_strings:
             for raw_p in sp.price_strings:
                 val = _extract_price_value(raw_p)
                 if val is not None:
                     price_val = val
                     display_price = raw_p
                     break
+
         items.append((cand, sp, price_val, display_price))
 
     min_price, max_price, most_expensive_only, cheapest_only = _parse_price_filter(query)
@@ -1921,7 +2055,24 @@ def _build_iphone_family_answer(query: str) -> Optional[str]:
             chosen = priced
             header = "We have these iPhones in the current catalog:"
 
+    # If the user asked for a specific iPhone label (for example, "iPhone 17")
+    # and we cannot find any catalog product whose name contains that label,
+    # be explicit that this exact model is not in the catalog before listing
+    # available options.
+    unavailable_line: Optional[str] = None
+    if requested_label_lower:
+        found_label_in_catalog = False
+        for cand, _sp, _price_val, _display_price in items:
+            name_lower = (getattr(cand, "name", "") or "").lower()
+            if requested_label_lower in name_lower:
+                found_label_in_catalog = True
+                break
+        if not found_label_in_catalog and requested_label is not None:
+            unavailable_line = f"I couldn't find {requested_label} in our catalog right now."
+
     lines: List[str] = []
+    if unavailable_line:
+        lines.append(unavailable_line)
     lines.append(header)
     for cand, sp, price_val, display_price in chosen:
         name = (getattr(cand, "name", "") or "iPhone").strip()
@@ -1969,6 +2120,28 @@ def answer_query(
                 "Im not fully sure what you mean. Can you rephrase or add a bit more detail?"
             )
         return msg_unclear, []
+
+    # Pure greetings (for example, "hi", "hello") should return a friendly
+    # welcome message instead of a generic fallback so that first contact in
+    # Slack feels natural.
+    cleaned = re.sub(r"[^a-zA-Z\s]", " ", raw_lower)
+    tokens = [t for t in cleaned.split() if t]
+    greeting_tokens = {"hi", "hello", "hey", "hii"}
+    if tokens and all(tok in greeting_tokens for tok in tokens):
+        mode_for_greet = _detect_mode(previous_user or raw_query)
+        if mode_for_greet == "HI_EN":
+            greet = (
+                "Hi! Main Grest ki support assistant hoon. Aap mujhse iPhones, "
+                "orders, returns, warranty, shipping ya kisi bhi aur sawal ke "
+                "baare mein pooch sakte ho."
+            )
+        else:
+            greet = (
+                "Hi! Im the support assistant for Grest. You can ask me about "
+                "iPhones, orders, returns, warranty, shipping, or anything else "
+                "related to Grest."
+            )
+        return greet, []
 
     # LLM-based normalization for noisy queries (typos/Hinglish) before
     # intent/domain/price parsing. This never raises and falls back to the
@@ -2469,7 +2642,11 @@ def answer_query(
         previous_user=previous_user,
         product_match=product_match if effective_intent == "product" else None,
         product_plan=product_plan if effective_intent == "product" else None,
-        product_specs_by_url=specs_by_url if effective_intent == "product" else None,
+        product_specs_by_url=(
+            _overlay_manual_iphone_prices_into_specs(specs_by_url)
+            if effective_intent == "product" and (domain_tag or "").lower() == "product_specs"
+            else None
+        ),
         domain_tag=domain_tag,
         is_comparison=comparison_query,
     )

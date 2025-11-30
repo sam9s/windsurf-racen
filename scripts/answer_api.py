@@ -34,6 +34,9 @@ except Exception:
 from racen.step3_retrieve import effective_settings  # noqa: E402
 from scripts.step4_answer import answer_query, get_last_debug_summary  # noqa: E402
 from racen.orchestrator import ingest_url as orchestrator_ingest_url  # noqa: E402
+from scripts.internal_tools.sync_product_specs_from_sheet import (  # noqa: E402
+    sync_specs_from_sheet,
+)
 import uuid  # noqa: E402
 from datetime import datetime  # noqa: E402
 
@@ -95,10 +98,46 @@ app = FastAPI(title="RACEN Answer API", version="1.0.0")
 # Simple in-memory job store for ingestion status (sufficient for local/dev and Slack polling)
 JOBS: dict[str, dict] = {}
 
+# Shared-secret env var names for admin-only operations (for example, Slack commands).
+# Prefer a general RACEN_ADMIN_TOKEN, but honour the legacy IPHONE_SPECS_SYNC_TOKEN
+# for backwards compatibility with earlier deployments.
+ADMIN_TOKEN_ENV = "RACEN_ADMIN_TOKEN"
+LEGACY_SPECS_ADMIN_TOKEN_ENV = "IPHONE_SPECS_SYNC_TOKEN"
+
+
+def _get_expected_admin_token() -> str:
+    """Return the expected admin token from the environment, if configured.
+
+    Checks the general :data:`ADMIN_TOKEN_ENV` first and falls back to the
+    legacy :data:`LEGACY_SPECS_ADMIN_TOKEN_ENV` to avoid breaking older
+    setups that only configured the iPhone-specific token.
+    """
+
+    token = os.getenv(ADMIN_TOKEN_ENV, "")
+    if token:
+        return token
+    return os.getenv(LEGACY_SPECS_ADMIN_TOKEN_ENV, "")
+
+
+def _enforce_admin_token(token: Optional[str]) -> None:
+    """Enforce the shared admin token when configured.
+
+    When no admin token is set in the environment this becomes a no-op so
+    local development remains frictionless. When a token *is* configured,
+    callers must supply the same value via the request payload.
+    """
+
+    expected = _get_expected_admin_token()
+    if not expected:
+        return
+    if not token or token != expected:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
 
 class IngestRequest(BaseModel):
     url: HttpUrl
     requested_by: str = Field(..., min_length=1)
+    token: Optional[str] = Field(default=None)
 
 
 class IngestResponse(BaseModel):
@@ -113,6 +152,45 @@ class IngestStatus(BaseModel):
     chunks_inserted: int | None = None
     embeddings_inserted: int | None = None
     updated_at: float
+
+
+class SpecsSyncRequest(BaseModel):
+    """Request payload for triggering an iPhone specs sheet→DB sync.
+
+    Args:
+        token: Optional shared-secret token. When an admin token environment
+            variable is configured (``RACEN_ADMIN_TOKEN`` or legacy
+            ``IPHONE_SPECS_SYNC_TOKEN``), this value must match it.
+        csv_path: Optional override CSV path, only used when the sheet URL
+            environment variable is not configured.
+    """
+
+    token: Optional[str] = Field(default=None)
+    csv_path: Optional[str] = Field(default=None)
+
+
+class SpecsSyncResponse(BaseModel):
+    """Response payload for the iPhone specs sheet→DB sync endpoint.
+
+    Mirrors the summary structure returned by ``sync_specs_from_sheet``.
+
+    Args:
+        status: Overall status ("ok", "skipped", or "error").
+        reason: Machine-readable reason when status is not "ok".
+        rows_written: Number of rows written to the specs table.
+        duplicate_slugs: List of duplicate slugs detected, if any.
+        slugs_all_missing: Slugs with all condition prices missing.
+        slugs_some_missing: Slugs with some condition prices missing.
+        source: Description of the data source (URL or path).
+    """
+
+    status: str
+    reason: str
+    rows_written: int
+    duplicate_slugs: List[str]
+    slugs_all_missing: List[str]
+    slugs_some_missing: List[str]
+    source: str
 
 
 def _validate_domain(url: str) -> None:
@@ -227,11 +305,16 @@ def answer(req: AnswerRequest) -> AnswerResponse:
 
 @app.post("/ingest/url", response_model=IngestResponse)
 def ingest_url_api(req: IngestRequest, background: BackgroundTasks) -> IngestResponse:
-    """
-    Enqueue a background ingestion job for a single URL.
+    """Enqueue a background ingestion job for a single URL.
 
-    Only grest.in domain is allowed. Returns a job_id that can be polled via /ingest/status/{job_id}.
+    Only grest.in domain is allowed. Returns a job_id that can be polled via
+    ``/ingest/status/{job_id}``.
     """
+
+    # Enforce shared admin token when configured so only trusted internal
+    # callers (for example, the Slack bot) can trigger ingestion even if the
+    # HTTP endpoint is reachable from elsewhere.
+    _enforce_admin_token(req.token)
     # Enforce optional ingest allowlist based on Slack user IDs
     allow_raw = os.getenv("INGEST_ALLOWED_USERS", "")
     allowlisted: set[str] = set(u.strip() for u in allow_raw.split(",") if u.strip())
@@ -258,6 +341,43 @@ def ingest_status_api(job_id: str) -> IngestStatus:
         chunks_inserted=st.get("chunks_inserted"),
         embeddings_inserted=st.get("embeddings_inserted"),
         updated_at=st.get("updated_at", 0.0),
+    )
+
+
+@app.post("/admin/sync/iphone-specs", response_model=SpecsSyncResponse)
+def sync_iphone_specs(req: SpecsSyncRequest) -> SpecsSyncResponse:
+    """Admin endpoint to sync iPhone specs from the Google Sheet into Postgres.
+
+    This is intended to be called from a Slack admin command in the sibling
+    Slack bot project. Authentication is handled via a simple shared-secret
+    token configured in the :data:`SPECS_SYNC_ADMIN_TOKEN_ENV` environment
+    variable.
+
+    Returns:
+        SpecsSyncResponse: Structured summary of the sync operation.
+    """
+
+    # Reuse the same admin token enforcement logic as other internal
+    # operations so we have a single scalable security pattern.
+    _enforce_admin_token(req.token)
+
+    try:
+        summary = sync_specs_from_sheet(csv_path=req.csv_path)
+    except Exception as exc:
+        # Surface a compact error back to the caller; full traceback stays in logs.
+        raise HTTPException(
+            status_code=500,
+            detail=f"Sync failed: {type(exc).__name__}: {exc}",
+        ) from exc
+
+    return SpecsSyncResponse(
+        status=str(summary.get("status", "")),
+        reason=str(summary.get("reason", "")),
+        rows_written=int(summary.get("rows_written", 0)),
+        duplicate_slugs=list(summary.get("duplicate_slugs", [])),
+        slugs_all_missing=list(summary.get("slugs_all_missing", [])),
+        slugs_some_missing=list(summary.get("slugs_some_missing", [])),
+        source=str(summary.get("source", "")),
     )
 
 

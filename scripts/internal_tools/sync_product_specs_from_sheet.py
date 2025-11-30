@@ -309,6 +309,113 @@ def _sync_rows(conn: Connection, rows: Iterable[Dict[str, str]]) -> int:
     return count
 
 
+def sync_specs_from_sheet(csv_path: Optional[str] = None) -> Dict[str, object]:
+    """Synchronise product specs from the configured Sheet/CSV into Postgres.
+
+    This is the programmatic equivalent of :func:`main`, intended for use by
+    admin HTTP endpoints (for example, when triggered from a Slack command).
+
+    Args:
+        csv_path: Optional override path to a CSV file. This is only used when
+            the :data:`SHEET_CSV_URL_ENV` environment variable is not set.
+
+    Returns:
+        Dict[str, object]: Summary dictionary with keys:
+            - ``status``: ``"ok"``, ``"skipped"``, or ``"error"``.
+            - ``reason``: Short machine-readable reason string.
+            - ``rows_written``: Number of rows synced into the table.
+            - ``duplicate_slugs``: List of duplicate slugs, if any.
+            - ``slugs_all_missing``: Slugs with all prices missing.
+            - ``slugs_some_missing``: Slugs with some prices missing.
+            - ``source``: String describing the data source (URL or path).
+    """
+
+    _load_env_from_file(ENV_PATH)
+
+    sheet_csv_url = os.getenv(SHEET_CSV_URL_ENV)
+    rows: List[Dict[str, str]]
+    source: str
+
+    if sheet_csv_url:
+        LOGGER.info("%s is set; loading rows from %s", SHEET_CSV_URL_ENV, sheet_csv_url)
+        rows = _load_rows_from_csv_url(sheet_csv_url)
+        source = sheet_csv_url
+    else:
+        effective_csv = Path(
+            csv_path or (PROJECT_ROOT / "outputs" / "product_specs_bootstrap.csv")
+        ).resolve()
+        LOGGER.info("Loading rows from %s", effective_csv)
+        rows = _load_rows_from_csv(effective_csv)
+        source = str(effective_csv)
+
+    if not rows:
+        LOGGER.warning("No rows loaded from %s; aborting without DB changes.", source)
+        return {
+            "status": "skipped",
+            "reason": "no_rows",
+            "rows_written": 0,
+            "duplicate_slugs": [],
+            "slugs_all_missing": [],
+            "slugs_some_missing": [],
+            "source": source,
+        }
+
+    duplicate_slugs = _find_duplicate_slugs(rows)
+    if duplicate_slugs:
+        LOGGER.error(
+            "Aborting sync: duplicate Slug values found in sheet: %s. "
+            "Please fix duplicates in the Google Sheet and rerun.",
+            ", ".join(sorted(duplicate_slugs)),
+        )
+        return {
+            "status": "error",
+            "reason": "duplicate_slugs",
+            "rows_written": 0,
+            "duplicate_slugs": sorted(duplicate_slugs),
+            "slugs_all_missing": [],
+            "slugs_some_missing": [],
+            "source": source,
+        }
+
+    slugs_all_missing, slugs_some_missing = _summarise_missing_prices(rows)
+    if slugs_all_missing:
+        LOGGER.warning(
+            "No prices set (Superb/Good/Fair) for slugs: %s. These products "
+            "may be ignored in price-based answers until prices are filled.",
+            ", ".join(sorted(slugs_all_missing)),
+        )
+    if slugs_some_missing:
+        LOGGER.warning(
+            "Some condition prices (Superb/Good/Fair) are missing for slugs: %s. "
+            "RACEN will use available prices and fall back or skip where "
+            "values are missing.",
+            ", ".join(sorted(slugs_some_missing)),
+        )
+
+    cfg = DBConfig.from_env()
+    conn: Optional[Connection] = None
+    try:
+        conn = get_conn(cfg)
+        written = _sync_rows(conn, rows)
+        LOGGER.info("Synced %d rows into docling.grest_iphone_product_specs", written)
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    return {
+        "status": "ok",
+        "reason": "",
+        "rows_written": written,
+        "duplicate_slugs": [],
+        "slugs_all_missing": sorted(slugs_all_missing),
+        "slugs_some_missing": sorted(slugs_some_missing),
+        "source": source,
+    }
+
+
 def main() -> None:
     """CLI entry point for syncing product specs from CSV into Postgres."""
 
@@ -328,57 +435,11 @@ def main() -> None:
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO)
-    _load_env_from_file(ENV_PATH)
-
-    sheet_csv_url = os.getenv(SHEET_CSV_URL_ENV)
-    if sheet_csv_url:
-        LOGGER.info("%s is set; loading rows from %s", SHEET_CSV_URL_ENV, sheet_csv_url)
-        rows = _load_rows_from_csv_url(sheet_csv_url)
-    else:
-        csv_path = Path(args.csv_path).resolve()
-        LOGGER.info("Loading rows from %s", csv_path)
-        rows = _load_rows_from_csv(csv_path)
-    if not rows:
-        LOGGER.warning("No rows loaded from CSV; aborting without DB changes.")
-        return
-
-    duplicate_slugs = _find_duplicate_slugs(rows)
-    if duplicate_slugs:
-        LOGGER.error(
-            "Aborting sync: duplicate Slug values found in sheet: %s. "
-            "Please fix duplicates in the Google Sheet and rerun.",
-            ", ".join(sorted(duplicate_slugs)),
-        )
-        return
-
-    slugs_all_missing, slugs_some_missing = _summarise_missing_prices(rows)
-    if slugs_all_missing:
-        LOGGER.warning(
-            "No prices set (Superb/Good/Fair) for slugs: %s. These products "
-            "may be ignored in price-based answers until prices are filled.",
-            ", ".join(sorted(slugs_all_missing)),
-        )
-    if slugs_some_missing:
-        LOGGER.warning(
-            "Some condition prices (Superb/Good/Fair) are missing for slugs: %s. "
-            "RACEN will use available prices and fall back or skip where "
-            "values are missing.",
-            ", ".join(sorted(slugs_some_missing)),
-        )
-
-    cfg = DBConfig.from_env()
-    conn: Optional[Connection]
-    conn = None
-    try:
-        conn = get_conn(cfg)
-        written = _sync_rows(conn, rows)
-        LOGGER.info("Synced %d rows into docling.grest_iphone_product_specs", written)
-    finally:
-        if conn is not None:
-            try:
-                conn.close()
-            except Exception:
-                pass
+    summary = sync_specs_from_sheet(csv_path=args.csv_path)
+    status = str(summary.get("status", ""))
+    if status != "ok":
+        reason = str(summary.get("reason", ""))
+        LOGGER.error("Specs sync did not complete successfully: %s", reason)
 
 
 if __name__ == "__main__":
