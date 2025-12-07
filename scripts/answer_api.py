@@ -10,9 +10,15 @@ import os
 import sys
 from pathlib import Path
 from typing import List, Optional
+import csv
+from io import StringIO
+from urllib.request import urlopen
 
 from fastapi import FastAPI, BackgroundTasks, HTTPException
-from pydantic import BaseModel, Field, HttpUrl, ValidationError
+from pydantic import BaseModel, Field, HttpUrl
+from google.oauth2.service_account import Credentials
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 
 # Ensure local 'src' is importable
 ROOT = Path(__file__).resolve().parents[1]
@@ -134,6 +140,198 @@ def _enforce_admin_token(token: Optional[str]) -> None:
         raise HTTPException(status_code=403, detail="Forbidden")
 
 
+def _load_iphone_specs_rows_from_sheet() -> List[IphoneSpecsRow]:
+    """Load all iPhone specs rows from the configured Google Sheet CSV.
+
+    This uses the same :data:`IPHONE_SPECS_SHEET_CSV_URL` configuration as the
+    sync script but keeps the logic local so the Answer API can serve rows
+    directly to the web UI without needing Postgres.
+    """
+
+    sheet_csv_url = os.getenv("IPHONE_SPECS_SHEET_CSV_URL", "").strip()
+    if not sheet_csv_url:
+        raise HTTPException(
+            status_code=500,
+            detail="IPHONE_SPECS_SHEET_CSV_URL is not configured",
+        )
+
+    try:
+        with urlopen(sheet_csv_url) as resp:  # type: ignore[call-arg]
+            data = resp.read().decode("utf-8")
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to fetch specs CSV: {type(exc).__name__}: {exc}",
+        ) from exc
+
+    fh = StringIO(data)
+    reader = csv.DictReader(fh)
+    rows: List[IphoneSpecsRow] = []
+    for raw in reader:
+        # Normalise keys and default missing cells to empty strings so the
+        # web UI can treat them uniformly.
+        payload = {
+            "S.No.": (raw.get("S.No.") or "").strip(),
+            "Model Details": (raw.get("Model Details") or "").strip(),
+            "Superb": (raw.get("Superb") or "").strip(),
+            "Good": (raw.get("Good") or "").strip(),
+            "Fair": (raw.get("Fair") or "").strip(),
+            "Slug": (raw.get("Slug") or "").strip(),
+            "ProductURL": (raw.get("ProductURL") or "").strip(),
+            "Details": (raw.get("Details") or "").strip(),
+        }
+        # Skip rows with no slug; they cannot be mapped reliably.
+        if not payload["Slug"]:
+            continue
+        rows.append(IphoneSpecsRow(**payload))
+    return rows
+
+
+def _save_iphone_specs_rows_to_sheet(rows: List[IphoneSpecsUpsertRow]) -> dict:
+    """Persist specs rows into the Google Sheet via the Sheets API.
+
+    This helper uses a service-account JSON file pointed to by the
+    :envvar:`GOOGLE_SHEETS_CREDENTIALS_PATH` environment variable together
+    with :envvar:`IPHONE_SPECS_SHEET_ID` and :envvar:`IPHONE_SPECS_SHEET_TAB`
+    to locate the correct worksheet.
+    """
+
+    creds_path = os.getenv("GOOGLE_SHEETS_CREDENTIALS_PATH", "").strip()
+    sheet_id = os.getenv("IPHONE_SPECS_SHEET_ID", "").strip()
+    sheet_tab = os.getenv("IPHONE_SPECS_SHEET_TAB", "").strip()
+
+    if not creds_path or not sheet_id or not sheet_tab:
+        raise HTTPException(
+            status_code=500,
+            detail="Google Sheets credentials or sheet identifiers are not configured",
+        )
+
+    try:
+        creds = Credentials.from_service_account_file(
+            creds_path,
+            scopes=["https://www.googleapis.com/auth/spreadsheets"],
+        )
+        service = build("sheets", "v4", credentials=creds)
+        sheet = service.spreadsheets()
+    except Exception as exc:  # Reason: surface configuration/auth issues clearly.
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to initialise Google Sheets client: {type(exc).__name__}: {exc}",
+        ) from exc
+
+    # First, fetch the current Slug column to locate existing rows.
+    slug_col = "F"  # Based on the current sheet layout for grest_iphone_product_specs
+    value_range = f"{sheet_tab}!{slug_col}:{slug_col}"
+    try:
+        slug_resp = sheet.values().get(spreadsheetId=sheet_id, range=value_range).execute()
+        slug_values = slug_resp.get("values", [])
+    except HttpError as exc:
+        # Surface rich error information from Google so we can diagnose
+        # configuration problems (permissions, missing sheet, bad range).
+        status = getattr(getattr(exc, "resp", None), "status", "?")
+        content = exc.content
+        if isinstance(content, bytes):
+            try:
+                content = content.decode("utf-8", errors="ignore")
+            except Exception:
+                content = repr(content)
+        detail = f"Failed to read existing slugs from sheet: HttpError {status}: {content}"
+        raise HTTPException(status_code=502, detail=detail) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to read existing slugs from sheet: {type(exc).__name__}: {exc}",
+        ) from exc
+
+    # Map slug -> row index (1-based). slug_values is a list of [slug] rows.
+    slug_to_row: dict[str, int] = {}
+    for idx, row_vals in enumerate(slug_values, start=1):
+        if not row_vals:
+            continue
+        slug_val = (row_vals[0] or "").strip()
+        if slug_val:
+            slug_to_row[slug_val] = idx
+
+    updated: List[str] = []
+    created: List[str] = []
+
+    # Prepare batch updates: one per upsert row.
+    data_updates: List[dict] = []
+    append_values: List[List[str]] = []
+
+    for r in rows:
+        # Sheet column order: S.No., Model Details, Superb, Good, Fair, Slug, ProductURL, Details
+        row_values = [
+            r.s_no,
+            r.model_details,
+            r.superb,
+            r.good,
+            r.fair,
+            r.slug,
+            r.product_url,
+            r.details,
+        ]
+
+        existing_row = slug_to_row.get(r.slug)
+        if not r.is_new and existing_row is not None:
+            # Update the existing row in-place.
+            target_range = f"{sheet_tab}!A{existing_row}:H{existing_row}"
+            data_updates.append(
+                {
+                    "range": target_range,
+                    "majorDimension": "ROWS",
+                    "values": [row_values],
+                }
+            )
+            updated.append(r.slug)
+        else:
+            # Append as a new row at the bottom.
+            append_values.append(row_values)
+            created.append(r.slug)
+
+    try:
+        # Apply in-place updates, if any.
+        if data_updates:
+            body = {"valueInputOption": "USER_ENTERED", "data": data_updates}
+            sheet.values().batchUpdate(spreadsheetId=sheet_id, body=body).execute()
+
+        # Append new rows, if any.
+        if append_values:
+            append_body = {
+                "values": append_values,
+                "majorDimension": "ROWS",
+            }
+            sheet.values().append(
+                spreadsheetId=sheet_id,
+                range=f"{sheet_tab}!A:H",
+                valueInputOption="USER_ENTERED",
+                insertDataOption="INSERT_ROWS",
+                body=append_body,
+            ).execute()
+    except HttpError as exc:
+        status = getattr(getattr(exc, "resp", None), "status", "?")
+        content = exc.content
+        if isinstance(content, bytes):
+            try:
+                content = content.decode("utf-8", errors="ignore")
+            except Exception:
+                content = repr(content)
+        detail = f"Failed to write to Google Sheet: HttpError {status}: {content}"
+        raise HTTPException(status_code=502, detail=detail) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to write to Google Sheet: {type(exc).__name__}: {exc}",
+        ) from exc
+
+    return {
+        "status": "ok",
+        "message": f"updated {len(updated)} rows, created {len(created)}",
+        "updated_slugs": updated,
+        "created_slugs": created,
+    }
+
+
 class IngestRequest(BaseModel):
     url: HttpUrl
     requested_by: str = Field(..., min_length=1)
@@ -191,6 +389,83 @@ class SpecsSyncResponse(BaseModel):
     slugs_all_missing: List[str]
     slugs_some_missing: List[str]
     source: str
+
+
+class IphoneSpecsRow(BaseModel):
+    """Representation of a single iPhone specs row from the Google Sheet.
+
+    This model mirrors the current sheet columns exactly, but exposes
+    Python-friendly field names in the API. All values are kept as strings so
+    the web UI can display and edit them without being tied to any particular
+    numeric formatting.
+
+    Args:
+        s_no: Serial number column (``"S.No."`` in the sheet).
+        model_details: Human-readable model details (``"Model Details"``).
+        superb: Price text for the "Superb" condition.
+        good: Price text for the "Good" condition.
+        fair: Price text for the "Fair" condition.
+        slug: Unique product slug.
+        product_url: Canonical product URL.
+        details: Free-form notes/details.
+    """
+
+    s_no: str = Field(alias="S.No.")
+    model_details: str = Field(alias="Model Details")
+    superb: str = Field(alias="Superb")
+    good: str = Field(alias="Good")
+    fair: str = Field(alias="Fair")
+    slug: str = Field(alias="Slug")
+    product_url: str = Field(alias="ProductURL")
+    details: str = Field(alias="Details")
+
+    class Config:
+        allow_population_by_field_name = True
+
+
+class IphoneSpecsUpsertRow(BaseModel):
+    """Payload for creating or updating a single iPhone specs row.
+
+    This mirrors :class:`IphoneSpecsRow` but adds an ``is_new`` flag so the
+    caller can explicitly request that a row be appended even if a matching
+    slug exists.
+    """
+
+    s_no: str
+    model_details: str
+    superb: str
+    good: str
+    fair: str
+    slug: str
+    product_url: str
+    details: str
+    is_new: bool = False
+
+
+class IphoneSpecsSaveRequest(BaseModel):
+    """Request payload for saving one or more iPhone specs rows.
+
+    Args:
+        rows: List of rows to create or update.
+    """
+
+    rows: List[IphoneSpecsUpsertRow]
+
+
+class IphoneSpecsSaveResponse(BaseModel):
+    """Response payload for the iPhone specs save endpoint.
+
+    Args:
+        status: Overall status ("ok" or "error").
+        message: Human-readable summary.
+        updated_slugs: Slugs of rows that were updated in-place.
+        created_slugs: Slugs of rows that were newly appended.
+    """
+
+    status: str
+    message: str
+    updated_slugs: List[str]
+    created_slugs: List[str]
 
 
 def _validate_domain(url: str) -> None:
@@ -378,6 +653,40 @@ def sync_iphone_specs(req: SpecsSyncRequest) -> SpecsSyncResponse:
         slugs_all_missing=list(summary.get("slugs_all_missing", [])),
         slugs_some_missing=list(summary.get("slugs_some_missing", [])),
         source=str(summary.get("source", "")),
+    )
+
+
+@app.get("/admin/iphone-specs/list", response_model=List[IphoneSpecsRow])
+def list_iphone_specs(token: Optional[str] = None) -> List[IphoneSpecsRow]:
+    """Return the current iPhone specs rows from the Google Sheet.
+
+    This admin-only endpoint is intended for the internal pricing console web
+    UI. It does **not** touch Postgres; instead it reads directly from the
+    configured Google Sheet CSV (``IPHONE_SPECS_SHEET_CSV_URL``) so that the
+    UI always reflects the sheet as the single source of truth.
+    """
+
+    _enforce_admin_token(token)
+    return _load_iphone_specs_rows_from_sheet()
+
+
+@app.post("/admin/iphone-specs/save", response_model=IphoneSpecsSaveResponse)
+def save_iphone_specs(req: IphoneSpecsSaveRequest, token: Optional[str] = None) -> IphoneSpecsSaveResponse:
+    """Create or update iPhone specs rows in the Google Sheet.
+
+    This admin-only endpoint is the write counterpart to
+    :func:`list_iphone_specs` and is intended to be called from the internal
+    pricing console web UI. The actual Google Sheets integration will be
+    implemented inside :func:`_save_iphone_specs_rows_to_sheet`.
+    """
+
+    _enforce_admin_token(token)
+    summary = _save_iphone_specs_rows_to_sheet(req.rows)
+    return IphoneSpecsSaveResponse(
+        status=str(summary.get("status", "")),
+        message=str(summary.get("message", "")),
+        updated_slugs=list(summary.get("updated_slugs", [])),
+        created_slugs=list(summary.get("created_slugs", [])),
     )
 
 

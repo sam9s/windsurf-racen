@@ -1,0 +1,58 @@
+.header {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
+  width: min(920px, 150vw);
+  margin: 0 auto;
+  padding: 0rem 0 0.55rem;
+}
+
+.logoWrapper {
+  position: absolute;
+  top: 0rem;
+  right: 0;
+  width: 70px;
+  height: 70px;
+}
+
+.logo {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+}
+
+.textBlock {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.1rem;
+  width: calc(100% - 80px);
+}
+
+.title {
+  margin: 0;
+  font-size: clamp(1.5rem, 3vw, 2.2rem);
+  letter-spacing: 1.1rem;
+  text-transform: uppercase;
+  font-weight: 300;
+  text-align: center;
+}
+
+.caption {
+  margin: 0;
+  color: rgba(148, 163, 184, 0.7);
+  font-size: 0.64rem;
+  letter-spacing: 0.74rem;
+  text-transform: uppercase;
+  text-align: center;
+}
+
+.extra {
+  margin-top: 0.9rem;
+  display: flex;
+  justify-content: center;
+  width: 100%;
+}
